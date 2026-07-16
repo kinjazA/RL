@@ -2,7 +2,7 @@
 
 End-to-end RLHF pipeline to align a language model for **constructive interview feedback** — training the model to point out issues and suggest improvements, rather than giving generic answers or doing the candidate's work for them.
 
-Built on **Qwen2.5-3B-Instruct** with **QLoRA** (4-bit quantization), runnable on a single T4 GPU.
+Built on **Qwen2.5-3B-Instruct** with **QLoRA** (4-bit quantization), runnable on a single GPU with 16GB+ VRAM.
 
 ---
 
@@ -79,12 +79,12 @@ Most interview prep tools just generate model answers. This project explores a d
 
 | Component | Choice | Rationale |
 |---|---|---|
-| **Base Model** | Qwen2.5-3B-Instruct | Good instruction-following, English-capable, fits T4 with QLoRA |
+| **Base Model** | Qwen2.5-3B-Instruct | Good instruction-following, English-capable, fits 16GB VRAM with QLoRA |
 | **PEFT** | QLoRA (4-bit NF4) | 4 models in PPO fit within ~16GB VRAM |
 | **SFT Data** | Alpaca + OpenAssistant + custom | ~8K samples: 5K interview / 2K general / 1K GPT-4 synthesized |
 | **RM Data** | Self-annotated preference pairs | ~300 pairs: good vs bad feedback for same Q&A |
 | **PPO Framework** | TRL (HuggingFace) | Production-ready RLHF library |
-| **Hardware** | Single T4 (16GB) | Free Colab tier or any cloud T4 instance |
+| **Hardware** | Single GPU (16GB+ VRAM) | Any cloud GPU instance (T4/A10G/L4) |
 
 ---
 
@@ -188,13 +188,13 @@ python data/prepare_sft_data.py    # downloads Alpaca/OASST1 + merges custom dat
 python data/prepare_rm_data.py     # formats preference pairs
 
 # 4. Train SFT
-python sft/train_sft.py            # QLoRA, ~2 hours on T4
+python sft/train_sft.py            # QLoRA, ~2 hours on a 16GB GPU
 
 # 5. Train Reward Model
-python rm/train_rm.py              # QLoRA + reward head, ~1 hour on T4
+python rm/train_rm.py              # QLoRA + reward head, ~1 hour on a 16GB GPU
 
 # 6. PPO Alignment
-python ppo/train_ppo.py            # TRL PPOTrainer, ~3 hours on T4
+python ppo/train_ppo.py            # TRL PPOTrainer, ~3 hours on a 16GB GPU
 
 # 7. Compare
 python eval/evaluate.py            # Side-by-side SFT vs RLHF outputs
@@ -289,7 +289,7 @@ python eval/evaluate.py            # Side-by-side SFT vs RLHF outputs
 #### 2.1 Environment & Model Setup
 - [ ] Install dependencies: `torch`, `transformers`, `peft`, `bitsandbytes`, `datasets`, `trl`
 - [ ] Pin versions in `requirements.txt`
-- [ ] Verify GPU: `torch.cuda.get_device_name()` → T4 16GB
+- [ ] Verify GPU via `torch.cuda.get_device_name()`
 - [ ] Load `Qwen/Qwen2.5-3B-Instruct` with 4-bit NF4 quantization via `bitsandbytes`
   - `load_in_4bit=True`
   - `bnb_4bit_compute_dtype=torch.bfloat16`
@@ -319,7 +319,7 @@ python eval/evaluate.py            # Side-by-side SFT vs RLHF outputs
   - `max_seq_length=1024`
 - [ ] Load `data/sft_train.jsonl` via `datasets.load_dataset()`
 - [ ] Train with `SFTTrainer` (from TRL)
-- [ ] Expected: ~2 hours on T4
+- [ ] Expected: ~2 hours on a 16GB GPU
 - [ ] Monitor: training loss drops from ~2.5 to ~1.0–1.5
 
 #### 2.4 Validation
@@ -359,7 +359,7 @@ python eval/evaluate.py            # Side-by-side SFT vs RLHF outputs
   probs = torch.sigmoid(score_chosen - score_rejected)
   loss = -torch.log(probs + 1e-5).mean()
   ```
-- [ ] Expected: ~1 hour on T4
+- [ ] Expected: ~1 hour on a 16GB GPU
 - [ ] Monitor: accuracy (score_chosen > score_rejected) → target > 75%
 
 #### 3.3 Validation
@@ -380,7 +380,7 @@ python eval/evaluate.py            # Side-by-side SFT vs RLHF outputs
 - [ ] **Reference model**: load SFT-merged checkpoint (frozen, no gradient)
 - [ ] **Reward model**: load RM checkpoint (frozen, no gradient)
 - [ ] **Critic model**: load SFT-merged checkpoint, add value head, apply QLoRA (trainable)
-- [ ] Verify total VRAM usage < 14 GB (peaks inside T4's 16GB)
+- [ ] Verify total VRAM usage < 14 GB
 
 #### 4.2 Prompt Dataset
 - [ ] Use 500 interview Q&A pairs from SFT training set as PPO prompts
@@ -409,7 +409,7 @@ python eval/evaluate.py            # Side-by-side SFT vs RLHF outputs
 
 #### 4.4 Training Loop
 - [ ] Initialize `PPOTrainer` from TRL
-- [ ] Run for 5000 steps (~3 hours on T4)
+- [ ] Run for 5000 steps (~3 hours on a 16GB GPU)
 - [ ] Each step:
   1. Policy generates responses for batch of prompts
   2. Reward model scores each response
