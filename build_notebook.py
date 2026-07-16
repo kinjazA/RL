@@ -177,7 +177,7 @@ add_code(
     '    logging_steps=10,\n'
     '    save_steps=200,\n'
     '    save_total_limit=2,\n'
-    '    evaluation_strategy="steps",\n'
+    '    eval_strategy="steps",\n'
     '    eval_steps=200,\n'
     '    load_best_model_at_end=True,\n'
     '    metric_for_best_model="eval_loss",\n'
