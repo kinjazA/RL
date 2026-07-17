@@ -36,10 +36,10 @@ CHECKPOINT = os.path.join(DATA_DIR, ".gen_reject_checkpoint.txt")
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 DEFAULT_BATCH_SIZE = 4
-DEFAULT_MAX_NEW_TOKENS = 256
+DEFAULT_MAX_NEW_TOKENS = 100  # short → 0.5B answers stay worse than chosen
 DEFAULT_MODEL_RATIO = 0.7
 
-SYSTEM_PROMPT = "Answer the following question briefly and concisely."
+SYSTEM_PROMPT = "Answer the following question very briefly, in one or two sentences. Do not elaborate."
 
 random.seed(42)
 
@@ -141,9 +141,10 @@ def generate_batch(model, tokenizer, prompts: list[str], max_new_tokens: int) ->
         outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            temperature=0.9,
+            temperature=1.0,
             top_p=0.95,
             do_sample=True,
+            repetition_penalty=1.25,
             pad_token_id=tokenizer.eos_token_id,
         )
 
