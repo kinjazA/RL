@@ -138,7 +138,6 @@ trainer = RewardTrainer(
     train_dataset=dataset["train"],
     eval_dataset=dataset["test"],
     processing_class=tokenizer,
-    max_length=1024,
 )
 
 trainer.train()
