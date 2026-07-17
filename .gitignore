@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Model adapters (too large for GitHub)
+rm/rm_adapter/
+sft_output/

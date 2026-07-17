@@ -99,13 +99,17 @@ Generated via `rm/gen_reject.py`:
 ```
 RL/
 ├── data/
-│   └── train.csv                  # SFT training data (5,558 Q&A)
+│   ├── train.csv                  # SFT training data (5,558 Q&A)
+│   └── rm_train.csv               # RM preference pairs (5,558)
 ├── rm/
 │   ├── gen_reject.py              # Generate rejected answers for RM
-│   ├── train_rm.py                # Train reward model
-│   └── RM_Training_Colab.ipynb    # One-click Colab notebook
+│   ├── train_rm.py                # Train reward model (RunPod A40)
+│   └── rm_adapter/                # Trained LoRA weights (gitignored, 115MB)
+├── sft/                           # SFT training scripts
+├── sft_output/                    # SFT LoRA weights (gitignored, 115MB)
+├── app.py                         # Gradio demo app (SFT + RM side-by-side)
+├── requirements.txt               # Dependencies for HF Spaces / local
 ├── SFT_Training_Colab.ipynb       # SFT training notebook
-├── build_notebook.py              # Notebook build script
 └── README.md
 ```
 
@@ -115,32 +119,71 @@ RL/
 
 ### Phase 1: SFT
 
-Open `SFT_Training_Colab.ipynb` in Google Colab (T4 GPU, free tier) → Run All.
+**Training results** (RunPod A40, 43 min):
+| Metric | Start | End |
+|--------|-------|-----|
+| Train Loss | 3.07 | 0.55 |
+| Best Eval Loss | - | 0.85 (step 800) |
 
-Or run locally:
+Run command:
 ```bash
-# SFT is best done via the Colab notebook — local training requires manual setup
-# See SFT_Training_Colab.ipynb for the full pipeline
+python -m sft.train --csv_path data/train.csv --output_dir sft_output
 ```
+
+Open `SFT_Training_Colab.ipynb` in Google Colab (T4 GPU, free tier) for the Colab version.
 
 ### Phase 2: Reward Model
 
-Open `rm/RM_Training_Colab.ipynb` in Colab → Run All. This runs both steps:
-
-**Step 1 — Generate rejected answers:**
+**Generate rejected answers:**
 ```bash
 python rm/gen_reject.py --batch_size 4 --model_ratio 0.7
 ```
 Uses Qwen2.5-0.5B (70%) + rule degradation (30%) to create rejected answers.
 Supports checkpoint resume on interruption.
 
-**Step 2 — Train reward model:**
+**Train reward model:**
 ```bash
 python rm/train_rm.py
 ```
-QLoRA + reward head on Qwen2.5-3B. Saves adapter to `rm/rm_adapter/`.
+QLoRA + reward head on Qwen2.5-3B. Designed for RunPod A40 (46GB VRAM) or similar GPU.
+
+**Training results** (RunPod A40, ~80 min):
+| Metric | Start | End |
+|--------|-------|-----|
+| Train Loss | 0.20 | 0.14 |
+| Eval Loss | 0.21 | 0.12 |
+| Eval Accuracy | 84.4% | 87.6% |
+| Eval Margin | 9.7 | 28.9 |
+
+Adapter saved to `rm/rm_adapter/` (~115MB LoRA weights).
 
 ### Phase 3: PPO (Coming Soon)
+
+---
+
+## Demo App
+
+Launch the Gradio app locally:
+
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+Open `http://localhost:7860` — enter an interview question, the **left panel** shows the model's answer and the **right panel** shows the reward model's quality score with a visual gauge.
+
+### Deploy to Hugging Face Spaces
+
+1. Push this repo to GitHub
+2. Go to [huggingface.co/new-space](https://huggingface.co/new-space)
+3. Choose **Gradio** SDK, point to your repo
+4. **Hardware**: pick **T4 GPU** (recommended) or **CPU** (slower, no RM scoring on CPU)
+5. HF Spaces auto-installs `requirements.txt` and launches `app.py`
+
+| Space Hardware | Speed | RM Scoring |
+|---------------|-------|------------|
+| **T4 GPU** (paid) | Fast (~2-3s / answer) | Yes |
+| **CPU** (free) | Slow (~15-30s / answer) | No (OOM risk) |
 
 ---
 
