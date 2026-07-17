@@ -1,6 +1,6 @@
 """
 Load CSV dataset and format into Qwen2.5 ChatML for SFT.
-Input:  merged_sft_dataset_cleaned.csv  (question, answer, source)
+Input:  train.csv  (question, answer, source)
 Output: DatasetDict with 'train' and 'test' splits, each sample has a 'text' field.
 """
 

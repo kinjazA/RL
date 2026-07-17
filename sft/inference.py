@@ -5,6 +5,8 @@ Usage:
 """
 
 import argparse
+import os
+import sys
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import PeftModel
@@ -18,14 +20,28 @@ def main():
     parser.add_argument("--adapter_path", required=True, help="Path to saved LoRA adapter")
     args = parser.parse_args()
 
+    adapter_path = os.path.abspath(args.adapter_path)
+    if not os.path.isdir(adapter_path):
+        print(f"ERROR: adapter path not found: {adapter_path}")
+        print("Did training finish? Run Cell 2 first.")
+        sys.exit(1)
+
+    config_file = os.path.join(adapter_path, "adapter_config.json")
+    if not os.path.isfile(config_file):
+        print(f"ERROR: adapter_config.json not found in {adapter_path}")
+        print("Training may not have completed successfully.")
+        sys.exit(1)
+
+    print(f"Loading adapter from: {adapter_path}")
+
     bnb = BitsAndBytesConfig(**BNB_CONFIG)
     base = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME, quantization_config=bnb, device_map="auto", trust_remote_code=True
     )
-    model = PeftModel.from_pretrained(base, args.adapter_path)
+    model = PeftModel.from_pretrained(base, adapter_path)
     model.eval()
 
-    tokenizer = AutoTokenizer.from_pretrained(args.adapter_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(adapter_path, trust_remote_code=True)
 
     questions = [
         "What does a Data Scientist do?",

@@ -1,7 +1,7 @@
 """
 SFT training entry point.
 Usage:
-    python -m sft.train --csv_path /content/RL/data/merged_sft_dataset_cleaned.csv --output_dir /content/RL/sft_output
+    python -m sft.train --csv_path /content/RL/data/train.csv --output_dir /content/RL/sft_output
 """
 
 import argparse
