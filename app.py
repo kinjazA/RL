@@ -52,12 +52,12 @@ def _load_sft():
         )
     else:
         base = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME, torch_dtype=torch.float16, device_map="cpu",
+            MODEL_NAME, torch_dtype=torch.bfloat16, device_map="cpu",
             trust_remote_code=True,
         )
     sft_model = PeftModel.from_pretrained(base, SFT_ADAPTER)
     sft_model.eval()
-    sft_tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    sft_tokenizer = AutoTokenizer.from_pretrained(SFT_ADAPTER, trust_remote_code=True)
     sft_tokenizer.pad_token = sft_tokenizer.eos_token
     print("[SFT] Ready.")
 
@@ -212,7 +212,7 @@ with gr.Blocks(title="Interview Answer Assistant — RLHF", theme=gr.themes.Soft
 
     with gr.Accordion("Generation Settings", open=False):
         with gr.Row():
-            max_tok = gr.Slider(64, 512, value=256, step=32, label="Max New Tokens")
+            max_tok = gr.Slider(64, 512, value=128, step=32, label="Max New Tokens")
             temp = gr.Slider(0.0, 1.5, value=0.7, step=0.05, label="Temperature")
 
     gr.Markdown("---")

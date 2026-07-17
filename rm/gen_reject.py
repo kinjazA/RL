@@ -80,6 +80,21 @@ def strip_bullets(text: str) -> str:
 
 STRATEGIES = [truncate, mid_drop, shuffle_paragraphs, strip_bullets]
 
+# ---- Negative-sample quality checks ----
+_MIN_NEG_LEN = 10
+_MAX_LEN_RATIO = 1.3  # rejected must not be >1.3x chosen (longer → may be better)
+
+
+def is_valid_negative(chosen: str, rejected: str) -> bool:
+    """Return False if rejected is not clearly worse than chosen."""
+    if not rejected or len(rejected.strip()) < _MIN_NEG_LEN:
+        return False
+    if rejected.strip() == chosen.strip():
+        return False
+    if len(rejected) > len(chosen) * _MAX_LEN_RATIO:
+        return False
+    return True
+
 
 def rule_reject(chosen: str) -> str:
     """Apply a random degradation strategy, ensuring output is shorter."""
@@ -223,6 +238,7 @@ def main():
         print(f"Model-generated: {len(model_indices)} remaining")
         batch_size = args.batch_size
         pbar = tqdm(range(0, len(model_indices), batch_size), desc="Generating (0.5B)")
+        total_fallback = 0
 
         for start in pbar:
             end = min(start + batch_size, len(model_indices))
@@ -237,14 +253,21 @@ def main():
                 out_f.close()
                 sys.exit(1)
 
+            n_fallback = 0
             for idx, prompt, chosen, rejected in zip(batch_idxs, batch_prompts, batch_chosens, rejected_list):
-                if not rejected or len(rejected) < 5:
-                    rejected = rule_reject(chosen)  # fallback
+                if not is_valid_negative(chosen, rejected):
+                    rejected = rule_reject(chosen)
+                    n_fallback += 1
                 writer.writerow([prompt, chosen, rejected])
                 save_checkpoint(idx)
                 processed += 1
+            total_fallback += n_fallback
 
-            pbar.set_postfix({"done": processed - (len(questions) - len(model_indices))})
+            pbar.set_postfix({"done": processed, "fallback": f"{n_fallback}/{len(batch_idxs)}"})
+
+        if total_fallback:
+            print(f"  → {total_fallback} model outputs ({100*total_fallback/len(model_indices):.0f}%) fell back to rule-based")
+        print(f"Model-generated: {len(model_indices)} done")
 
     out_f.close()
 
