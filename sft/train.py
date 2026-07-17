@@ -8,12 +8,17 @@ import argparse
 import sys
 
 import torch
-from transformers import TrainingArguments
 from trl import SFTTrainer
 
 from .config import TRAINING_ARGS, MAX_SEQ_LENGTH
 from .dataset_utils import load_and_format
 from .model_utils import load_model_and_tokenizer
+
+# SFTConfig available from trl>=0.9; fall back to TrainingArguments for older versions
+try:
+    from trl import SFTConfig as _SFTConfig
+except ImportError:
+    from transformers import TrainingArguments as _SFTConfig
 
 
 def main():
@@ -38,21 +43,30 @@ def main():
     print("\n[2/3] Loading model with 4-bit QLoRA ...")
     model, tokenizer = load_model_and_tokenizer()
 
-    # ---- Train ----
-    print("\n[3/3] Training ...")
-    training_args = TrainingArguments(
-        output_dir=args.output_dir,
-        **{k: v for k, v in TRAINING_ARGS.items() if k != "output_dir"},
-    )
+    # ---- Tokenize dataset (before trainer to avoid text-column collision) ----
+    print("\n[3/3] Tokenizing & training ...")
+
+    def _tokenize(batch):
+        return tokenizer(
+            batch["text"],
+            truncation=True,
+            padding=False,
+            max_length=MAX_SEQ_LENGTH,
+        )
+
+    tokenized = dataset.map(_tokenize, batched=True, remove_columns=["text"])
+
+    # ---- Training config ----
+    sft_kwargs = dict(TRAINING_ARGS)
+    sft_kwargs["output_dir"] = args.output_dir
+    training_args = _SFTConfig(**sft_kwargs)
 
     trainer = SFTTrainer(
         model=model,
         args=training_args,
-        train_dataset=dataset["train"],
-        eval_dataset=dataset["test"] if "test" in dataset else None,
+        train_dataset=tokenized["train"],
+        eval_dataset=tokenized.get("test"),
         tokenizer=tokenizer,
-        max_seq_length=MAX_SEQ_LENGTH,
-        dataset_text_field="text",
     )
 
     trainer.train()

@@ -40,7 +40,6 @@ TRAINING_ARGS = {
     "load_best_model_at_end": True,
     "metric_for_best_model": "eval_loss",
     "report_to": "none",
-    "remove_unused_columns": False,
 }
 
 MAX_SEQ_LENGTH = 1024
