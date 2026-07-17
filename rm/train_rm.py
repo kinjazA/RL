@@ -26,10 +26,9 @@ from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
     BitsAndBytesConfig,
-    TrainingArguments,
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
-from trl import RewardTrainer
+from trl import RewardConfig, RewardTrainer
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -113,14 +112,14 @@ model.print_trainable_parameters()
 # ---------------------------------------------------------------------------
 # 3. Train
 # ---------------------------------------------------------------------------
-training_args = TrainingArguments(
+training_args = RewardConfig(
     output_dir=OUTPUT_DIR,
     per_device_train_batch_size=2,
     gradient_accumulation_steps=4,
     num_train_epochs=3,
     learning_rate=1e-4,
     lr_scheduler_type="cosine",
-    warmup_ratio=0.03,
+    warmup_steps=50,
     bf16=True,
     logging_steps=10,
     save_steps=200,
@@ -130,6 +129,7 @@ training_args = TrainingArguments(
     load_best_model_at_end=True,
     report_to="none",
     remove_unused_columns=False,
+    max_length=1024,
 )
 
 trainer = RewardTrainer(
