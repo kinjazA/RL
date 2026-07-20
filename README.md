@@ -124,6 +124,8 @@ RL/
 | Train Loss | 3.07 | 0.55 |
 | Best Eval Loss | - | 0.85 (step 800) |
 
+**SFT Adapter:** [Shawnno/RL-sft-adapter](https://huggingface.co/Shawnno/RL-sft-adapter)
+
 Run command:
 ```bash
 python -m sft.train --csv_path data/train.csv --output_dir sft_output
@@ -151,6 +153,8 @@ QLoRA + reward head on Qwen2.5-3B. Designed for RunPod A40 (46GB VRAM) or simila
 | Train Loss (end) | 0.133 |
 | Eval Loss | 0.697 |
 | Epochs | 3 |
+
+**RM Adapter:** [Shawnno/RL-rm-adapter](https://huggingface.co/Shawnno/RL-rm-adapter)
 
 Adapter saved to `rm/rm_adapter/` (~115MB LoRA weights).
 
