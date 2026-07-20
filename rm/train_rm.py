@@ -62,12 +62,6 @@ def format_rm_row(row):
     return {"chosen": chosen_text, "rejected": rejected_text}
 
 
-records = [format_rm_row(row) for _, row in df.iterrows()]
-dataset = Dataset.from_list(records)
-dataset = dataset.train_test_split(test_size=0.05, seed=42)
-print(f"Train: {len(dataset['train']):,}  |  Val: {len(dataset['test']):,}")
-
-
 # ---------------------------------------------------------------------------
 # 2. Load Model with QLoRA
 # ---------------------------------------------------------------------------
@@ -93,6 +87,25 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "right"
 model.config.pad_token_id = tokenizer.pad_token_id
+
+# Build tokenized dataset (needs tokenizer already loaded)
+records = [format_rm_row(row) for _, row in df.iterrows()]
+raw = Dataset.from_list(records).train_test_split(test_size=0.05, seed=42)
+
+def _tok(batch):
+    out = {"input_ids_chosen": [], "attention_mask_chosen": [],
+           "input_ids_rejected": [], "attention_mask_rejected": []}
+    for c, r in zip(batch["chosen"], batch["rejected"]):
+        ce = tokenizer(c, truncation=True, max_length=1024)
+        re = tokenizer(r, truncation=True, max_length=1024)
+        out["input_ids_chosen"].append(ce["input_ids"])
+        out["attention_mask_chosen"].append(ce["attention_mask"])
+        out["input_ids_rejected"].append(re["input_ids"])
+        out["attention_mask_rejected"].append(re["attention_mask"])
+    return out
+
+dataset = raw.map(_tok, batched=True, remove_columns=["chosen", "rejected"])
+print(f"Train: {len(dataset['train']):,}  |  Val: {len(dataset['test']):,}")
 
 lora_config = LoraConfig(
     r=16,
@@ -137,7 +150,7 @@ trainer = RewardTrainer(
     args=training_args,
     train_dataset=dataset["train"],
     eval_dataset=dataset["test"],
-    processing_class=tokenizer,
+    tokenizer=tokenizer,
 )
 
 trainer.train()

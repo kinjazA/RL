@@ -239,7 +239,7 @@ with gr.Blocks(title="Interview Answer Assistant — RLHF", theme=gr.themes.Soft
         f"Device: **{_device.upper()}** &nbsp;|&nbsp; "
         f"Base: Qwen2.5-3B-Instruct &nbsp;|&nbsp; "
         f"QLoRA rank=16 alpha=32 &nbsp;|&nbsp; "
-        f"RM accuracy: 87.6% &nbsp;|&nbsp; margin: 28.9"
+        f"RM accuracy: 65.1% &nbsp;|&nbsp; eval loss: 0.697"
         f"</div>"
     )
 

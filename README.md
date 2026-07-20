@@ -109,7 +109,6 @@ RL/
 ├── sft_output/                    # SFT LoRA weights (gitignored, 115MB)
 ├── app.py                         # Gradio demo app (SFT + RM side-by-side)
 ├── requirements.txt               # Dependencies for HF Spaces / local
-├── SFT_Training_Colab.ipynb       # SFT training notebook
 └── README.md
 ```
 
@@ -130,8 +129,6 @@ Run command:
 python -m sft.train --csv_path data/train.csv --output_dir sft_output
 ```
 
-Open `SFT_Training_Colab.ipynb` in Google Colab (T4 GPU, free tier) for the Colab version.
-
 ### Phase 2: Reward Model
 
 **Generate rejected answers:**
@@ -147,13 +144,13 @@ python rm/train_rm.py
 ```
 QLoRA + reward head on Qwen2.5-3B. Designed for RunPod A40 (46GB VRAM) or similar GPU.
 
-**Training results** (RunPod A40, ~80 min):
-| Metric | Start | End |
-|--------|-------|-----|
-| Train Loss | 0.20 | 0.14 |
-| Eval Loss | 0.21 | 0.12 |
-| Eval Accuracy | 84.4% | 87.6% |
-| Eval Margin | 9.7 | 28.9 |
+**Training results** (RunPod A40, ~2 hr):
+| Metric | Value |
+|--------|-------|
+| Eval Accuracy | 65.1% |
+| Train Loss (end) | 0.133 |
+| Eval Loss | 0.697 |
+| Epochs | 3 |
 
 Adapter saved to `rm/rm_adapter/` (~115MB LoRA weights).
 
