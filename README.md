@@ -105,8 +105,13 @@ RL/
 │   ├── gen_reject.py              # Generate rejected answers for RM
 │   ├── train_rm.py                # Train reward model (RunPod A40)
 │   └── rm_adapter/                # Trained LoRA weights (gitignored, 115MB)
+├── ppo/
+│   └── train_ppo.py               # PPO alignment training (4-model setup)
 ├── sft/                           # SFT training scripts
-├── sft_output/                    # SFT LoRA weights (gitignored, 115MB)
+│   ├── train.py                    # Training entry point (v2)
+│   └── checks/
+│       └── verify_collator.py      # Pre-training sanity checks
+├── sft_output/                    # SFT LoRA weights (gitignored, ~120MB)
 ├── app.py                         # Gradio demo app (SFT + RM side-by-side)
 ├── requirements.txt               # Dependencies for HF Spaces / local
 └── README.md
@@ -118,18 +123,32 @@ RL/
 
 ### Phase 1: SFT
 
-**Training results** (RunPod A40, 43 min):
+**Pre-training checks:**
+```bash
+python -m sft.checks.verify_collator
+```
+
+**Run command:**
+```bash
+python -m sft.train --csv_path data/train.csv --output_dir sft_output
+```
+
+**Training results v1** (RunPod A40, 43 min):
 | Metric | Start | End |
 |--------|-------|-----|
 | Train Loss | 3.07 | 0.55 |
 | Best Eval Loss | - | 0.85 (step 800) |
 
-**SFT Adapter:** [Shawnno/RL-sft-adapter](https://huggingface.co/Shawnno/RL-sft-adapter)
+**Training results v2** (RunPod A40, 50 min, 1,104 steps):
+| Metric | Value |
+|--------|-------|
+| Train Loss (end) | 0.73 |
+| Best Eval Loss | 0.846 |
+| Oversampled | SE ×3, DS ×3 (5,280 → 5,892) |
 
-Run command:
-```bash
-python -m sft.train --csv_path data/train.csv --output_dir sft_output
-```
+> v2 loss is **assistant-tokens only** — numerically higher than v1 (full-sequence) but not directly comparable. See [V2 Improvements](#v2-improvements-2026-07) below.
+
+**SFT Adapter:** [Shawnno/RL-sft-adapter](https://huggingface.co/Shawnno/RL-sft-adapter) (v2)
 
 ### Phase 2: Reward Model
 
@@ -158,7 +177,14 @@ QLoRA + reward head on Qwen2.5-3B. Designed for RunPod A40 (46GB VRAM) or simila
 
 Adapter saved to `rm/rm_adapter/` (~115MB LoRA weights).
 
-### Phase 3: PPO (Coming Soon)
+### Phase 3: PPO Alignment
+
+**Run PPO training:**
+```bash
+python ppo/train_ppo.py
+```
+
+Loads 4 models in 4-bit (policy, reference, reward, critic), generates responses with the policy, scores with the reward model, and applies PPO clip loss with KL penalty against the reference model. Output saved to `ppo/ppo_adapter/` (~115MB LoRA weights).
 
 ---
 
@@ -204,6 +230,7 @@ A side-by-side evaluation compared the base Qwen2.5-3B-Instruct against the SFT 
 | P2 | **System prompt** — every training example now includes a role-defining system message | `dataset_utils.py`, `inference.py` | Consistent interview persona, no refusal drift |
 | P3 | **Domain oversampling** — SE (174) and DS (145) duplicated 3× in training set | `dataset_utils.py`, `config.py` | Mitigates factual errors from low-sample domains |
 | P4 | **`check_seq_lengths()`** — utility to verify truncation ratio before training | `dataset_utils.py` | Prevents silent answer truncation |
+| -  | **`verify_collator.py`** — pre-training sanity checks | `sft/checks/` | Confirms collator import + loss masking anchor before spending GPU time |
 
 To run the v2 training:
 

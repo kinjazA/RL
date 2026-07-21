@@ -220,3 +220,4 @@ __marimo__/
 # Model adapters (too large for GitHub)
 rm/rm_adapter/
 sft_output/
+ppo/ppo_adapter/
