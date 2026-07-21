@@ -162,6 +162,64 @@ Adapter saved to `rm/rm_adapter/` (~115MB LoRA weights).
 
 ---
 
+## V2 Improvements (2026-07)
+
+### Base vs SFT Evaluation
+
+A side-by-side evaluation compared the base Qwen2.5-3B-Instruct against the SFT fine-tuned adapter
+(QLoRA r=16, 3 epochs) on domain-representative interview questions from the trained domains
+(ML/DL, SE, DS, HR, Career). Both models use the same 4-bit quantization — only the LoRA adapter is toggled on/off.
+
+| Domain | Question | Base Model | SFT Model | Verdict |
+|--------|----------|-----------|-----------|---------|
+| ML | Explain gradient descent as a beginner | Mountain-hiking analogy, intuitive | Textbook definition, dry | **Base wins** — SFT lost the "beginner" framing |
+| ML | What is overfitting? | Detailed explanation + symptoms | Condensed 5-point prevention list | **Near-verbatim from training data** — SFT overfit |
+| HR | Time you failed? | ❌ Refused ("As an AI...") | ✅ First-person, E-commerce story | **SFT wins** — learned role-play |
+| HR | Why leave current job? | ❌ Refused again | ✅ Interview persona with motivation | **SFT wins** — consistent persona |
+| Career | Data Scientist day-to-day? | Informative bullet list | Conversational but less dense | Draw |
+| SE | Linked list vs array? | ✅ Accurate (O(1) access, contiguous memory) | ❌ Factual error: O(log n) search | **SFT hallucinated** — base more reliable |
+| Finance | Time value of money? | ✅ Correct explanation | ❌ Empty word-salad | **SFT failed on unseen domain** |
+| PM | Feature prioritization? | Structured framework answer | Started OK, ended with off-topic question | **SFT drifted** |
+
+### Key Findings
+
+1. **HR/Career domains (57% of training data)** — Strong gains: SFT model learned to role-play as a candidate
+   with first-person examples, overcoming the base model's "As an AI" refusal pattern.
+
+2. **ML/SE/DS technical domains (15%)** — Mixed results: near-verbatim memorization when question matches
+   training data; factual errors introduced for low-sample domains (SE: 174 samples → O(log n) hallucination).
+
+3. **Untrained domains (Finance, PM: 0%)** — Catastrophic degradation: SFT outputs become circular word-salad
+   or drift off-topic, significantly worse than the base model.
+
+4. **Root cause** — Loss was computed on the full ChatML sequence (user prompt + assistant answer),
+   wasting ~50% of training capacity on memorizing the prompt instead of learning to answer.
+
+### V2 Training Improvements
+
+| # | Change | Files | Expected Impact |
+|---|--------|-------|-----------------|
+| P0 | **Loss masking** — `DataCollatorForCompletionOnlyLM` restricts loss to assistant tokens only | `train.py` | Less memorization, better generalization to unseen phrasings |
+| P1 | **NEFTune noise** (alpha=5) — embedding-level perturbation reduces overfitting | `train.py`, `config.py` | Smoother loss curve, less verbatim reproduction |
+| P2 | **System prompt** — every training example now includes a role-defining system message | `dataset_utils.py`, `inference.py` | Consistent interview persona, no refusal drift |
+| P3 | **Domain oversampling** — SE (174) and DS (145) duplicated 3× in training set | `dataset_utils.py`, `config.py` | Mitigates factual errors from low-sample domains |
+| P4 | **`check_seq_lengths()`** — utility to verify truncation ratio before training | `dataset_utils.py` | Prevents silent answer truncation |
+
+To run the v2 training:
+
+```bash
+# 1. Check if MAX_SEQ_LENGTH needs adjustment
+python -c "from sft.dataset_utils import check_seq_lengths; check_seq_lengths('data/train.csv')"
+
+# 2. Train
+python -m sft.train --csv_path data/train.csv --output_dir sft_output
+```
+
+**Comparison notebook**: [`Compare_Base_vs_SFT.ipynb`](Compare_Base_vs_SFT.ipynb) — run in Colab (T4 GPU)
+to reproduce the base vs SFT comparison with the current or v2 adapter.
+
+---
+
 ## Demo App
 
 Launch the Gradio app locally:

@@ -12,7 +12,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import PeftModel
 
 from .config import MODEL_NAME, BNB_CONFIG
-from .dataset_utils import CHATML_USER, CHATML_ASSISTANT, CHATML_END, NL
+from .dataset_utils import CHATML_SYSTEM, CHATML_USER, CHATML_ASSISTANT, CHATML_END, NL, SYSTEM_TEXT
 
 
 def main():
@@ -50,7 +50,11 @@ def main():
     ]
 
     for q in questions:
-        prompt = f"{CHATML_USER}{NL}{q}{CHATML_END}{NL}{CHATML_ASSISTANT}{NL}"
+        prompt = (
+            f"{CHATML_SYSTEM}{NL}{SYSTEM_TEXT}{CHATML_END}{NL}"
+            f"{CHATML_USER}{NL}{q}{CHATML_END}{NL}"
+            f"{CHATML_ASSISTANT}{NL}"
+        )
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
         with torch.no_grad():
             outputs = model.generate(**inputs, max_new_tokens=200, temperature=0.7, do_sample=True)

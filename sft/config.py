@@ -45,3 +45,10 @@ TRAINING_ARGS = {
 MAX_SEQ_LENGTH = 1024
 TRAIN_VAL_SPLIT = 0.05
 RANDOM_SEED = 42
+
+# ---- Data augmentation ----
+OVERAMPLE_SOURCES = ["se_interview", "ds_qa_treasury"]  # underrepresented domains
+OVERAMPLE_FACTOR = 3  # duplicate each 3x in training set
+
+# ---- NEFTune ----
+NEFTUNE_NOISE_ALPHA = 5  # embedding noise to reduce overfitting (TRL>=0.9)

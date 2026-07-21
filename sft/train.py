@@ -1,17 +1,27 @@
 """
-SFT training entry point.
+SFT training entry point — v2.
 Usage:
-    python -m sft.train --csv_path /content/RL/data/train.csv --output_dir /content/RL/sft_output
+    python -m sft.train --csv_path data/train.csv --output_dir sft_output
+
+v2 improvements over v1:
+  - Loss only on assistant tokens (DataCollatorForCompletionOnlyLM)
+  - NEFTune embedding noise to reduce overfitting
+  - System prompt in training examples
+  - Oversampling of underrepresented domains (SE, DS)
 """
 
 import argparse
 import sys
 
 import torch
-from trl import SFTTrainer
+from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
 
-from .config import TRAINING_ARGS, MAX_SEQ_LENGTH
-from .dataset_utils import load_and_format
+from .config import (
+    TRAINING_ARGS,
+    MAX_SEQ_LENGTH,
+    NEFTUNE_NOISE_ALPHA,
+)
+from .dataset_utils import load_and_format, CHATML_ASSISTANT, NL
 from .model_utils import load_model_and_tokenizer
 
 # Newer TRL (>=0.9) uses SFTConfig; older uses TrainingArguments
@@ -45,6 +55,13 @@ def main():
     print("\n[2/3] Loading model with 4-bit QLoRA ...")
     model, tokenizer = load_model_and_tokenizer()
 
+    # ---- Data collator: loss only on assistant tokens ----
+    response_template = f"{CHATML_ASSISTANT}{NL}"
+    collator = DataCollatorForCompletionOnlyLM(
+        response_template=response_template,
+        tokenizer=tokenizer,
+    )
+
     # ---- Train ----
     print("\n[3/3] Training ...")
 
@@ -55,7 +72,7 @@ def main():
         sft_kwargs["max_seq_length"] = MAX_SEQ_LENGTH
         sft_kwargs["dataset_text_field"] = "text"
         training_args = _TrainConfig(**sft_kwargs)
-        trainer_kwargs = {}
+        trainer_kwargs = {"neftune_noise_alpha": NEFTUNE_NOISE_ALPHA}
     else:
         training_args = _TrainConfig(**sft_kwargs)
         trainer_kwargs = {
@@ -68,6 +85,7 @@ def main():
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset.get("test"),
+        data_collator=collator,
         tokenizer=tokenizer,
         **trainer_kwargs,
     )

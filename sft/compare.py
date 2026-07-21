@@ -18,18 +18,18 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import PeftModel
 
 from .config import MODEL_NAME, BNB_CONFIG
-from .dataset_utils import CHATML_USER, CHATML_ASSISTANT, CHATML_END, NL
+from .dataset_utils import CHATML_SYSTEM, CHATML_USER, CHATML_ASSISTANT, CHATML_END, NL, SYSTEM_TEXT
 
-# Test questions covering different domains
+# Test questions covering trained domains — none from train.csv
 QUESTIONS = [
     ("ML", "Explain gradient descent as if I'm a beginner."),
-    ("ML", "What is overfitting and how do you prevent it?"),
+    ("ML", "What is transfer learning and when would you use it?"),
     ("HR", "Tell me about a time you failed and what you learned."),
     ("HR", "Why do you want to leave your current job?"),
     ("Career", "What does a Data Scientist do day-to-day?"),
     ("SE", "What is the difference between a linked list and an array?"),
-    ("Finance", "Explain the time value of money."),
-    ("PM", "How do you prioritize features in a product roadmap?"),
+    ("SE", "What is a REST API and how does it work?"),
+    ("DS", "What is the difference between correlation and causation?"),
 ]
 
 
@@ -42,7 +42,11 @@ def strip_answer(full_text: str) -> str:
 
 
 def generate(model, tokenizer, question: str, max_tokens: int = 200) -> str:
-    prompt = f"{CHATML_USER}{NL}{question}{CHATML_END}{NL}{CHATML_ASSISTANT}{NL}"
+    prompt = (
+        f"{CHATML_SYSTEM}{NL}{SYSTEM_TEXT}{CHATML_END}{NL}"
+        f"{CHATML_USER}{NL}{question}{CHATML_END}{NL}"
+        f"{CHATML_ASSISTANT}{NL}"
+    )
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
