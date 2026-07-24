@@ -1,11 +1,23 @@
 # SFT dependencies for Qwen2.5-3B + QLoRA
-# Install: pip install -r requirements_sft.txt
+#
+# One-shot install:
+#   pip install -r requirements_sft.txt
+#
+# If torch/torchvision version conflict, nuke and reinstall:
+#   pip uninstall torch torchvision triton -y
+#   pip install -r requirements_sft.txt
 
-torch>=2.1.0
-transformers>=4.40.0,<4.46.0
-peft>=0.10.0
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+torch==2.6.0
+torchvision==0.21.0
+transformers==4.48.3
+peft==0.14.0
 bitsandbytes>=0.43.0
-trl>=0.8.0,<0.11.0
+trl==0.15.2
 datasets>=2.16.0
 accelerate>=0.28.0
 pandas
+scipy
+tensorboardX
+huggingface_hub

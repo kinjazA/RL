@@ -79,8 +79,9 @@ def main():
     if _NEW_TRL:
         sft_kwargs["max_seq_length"] = MAX_SEQ_LENGTH
         sft_kwargs["dataset_text_field"] = "text"
+        sft_kwargs["neftune_noise_alpha"] = NEFTUNE_NOISE_ALPHA
         training_args = _TrainConfig(**sft_kwargs)
-        trainer_kwargs = {"neftune_noise_alpha": NEFTUNE_NOISE_ALPHA}
+        trainer_kwargs = {}
     else:
         training_args = _TrainConfig(**sft_kwargs)
         trainer_kwargs = {
@@ -94,7 +95,7 @@ def main():
         train_dataset=dataset["train"],
         eval_dataset=dataset.get("test"),
         data_collator=collator,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         **trainer_kwargs,
     )
 
