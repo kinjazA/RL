@@ -37,6 +37,8 @@ from transformers import (
 from peft import LoraConfig, get_peft_model, PeftModel, prepare_model_for_kbit_training
 from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
 
+from sft.chatml import build_full, build_prompt
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -49,22 +51,14 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "ppo_adapter")
 MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 
 # ---------------------------------------------------------------------------
-# ChatML
-# ---------------------------------------------------------------------------
-U = "<|im_start|>user"
-A = "<|im_start|>assistant"
-E = "<|im_end|>"
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def chatml_prompt(question: str) -> str:
-    return f"{U}\n{question}{E}\n{A}\n"
+    return build_prompt(question)
 
 
 def chatml_full(question: str, answer: str) -> str:
-    return f"{U}\n{question}{E}\n{A}\n{answer}{E}"
+    return build_full(question, answer)
 
 
 # ---------------------------------------------------------------------------

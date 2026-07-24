@@ -12,7 +12,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import PeftModel
 
 from .config import MODEL_NAME, BNB_CONFIG
-from .dataset_utils import CHATML_SYSTEM, CHATML_USER, CHATML_ASSISTANT, CHATML_END, NL, SYSTEM_TEXT
+from .chatml import build_prompt, strip_assistant_answer
 
 
 def main():
@@ -50,18 +50,12 @@ def main():
     ]
 
     for q in questions:
-        prompt = (
-            f"{CHATML_SYSTEM}{NL}{SYSTEM_TEXT}{CHATML_END}{NL}"
-            f"{CHATML_USER}{NL}{q}{CHATML_END}{NL}"
-            f"{CHATML_ASSISTANT}{NL}"
-        )
+        prompt = build_prompt(q)
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
         with torch.no_grad():
             outputs = model.generate(**inputs, max_new_tokens=200, temperature=0.7, do_sample=True)
         full = tokenizer.decode(outputs[0], skip_special_tokens=False)
-        # Extract assistant reply
-        marker = f"{CHATML_ASSISTANT}{NL}"
-        answer = full.split(marker)[-1].replace(CHATML_END, "").strip()
+        answer = strip_assistant_answer(full)
         print(f"\n{'='*60}\nQ: {q}\nA: {answer[:400]}")
 
 

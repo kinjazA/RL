@@ -27,8 +27,8 @@ LORA_CONFIG = {
 TRAINING_ARGS = {
     "per_device_train_batch_size": 4,
     "gradient_accumulation_steps": 4,
-    "num_train_epochs": 3,
-    "learning_rate": 2e-4,
+    "num_train_epochs": 2,
+    "learning_rate": 1e-4,
     "lr_scheduler_type": "cosine",
     "warmup_ratio": 0.03,
     "bf16": True,
@@ -47,8 +47,12 @@ TRAIN_VAL_SPLIT = 0.05
 RANDOM_SEED = 42
 
 # ---- Data augmentation ----
-OVERAMPLE_SOURCES = ["se_interview", "ds_qa_treasury"]  # underrepresented domains
-OVERAMPLE_FACTOR = 3  # duplicate each 3x in training set
+OVERSAMPLE_SOURCES = ["se_interview", "ds_qa_treasury"]  # underrepresented domains
+OVERSAMPLE_FACTOR = 2  # duplicate each 2x in training set
+
+# Backward-compatible aliases for older notebooks/scripts.
+OVERAMPLE_SOURCES = OVERSAMPLE_SOURCES
+OVERAMPLE_FACTOR = OVERSAMPLE_FACTOR
 
 # ---- NEFTune ----
 NEFTUNE_NOISE_ALPHA = 5  # embedding noise to reduce overfitting (TRL>=0.9)

@@ -13,17 +13,13 @@ from transformers import (
 )
 from peft import PeftModel
 
+from sft.chatml import build_full, build_prompt, strip_assistant_answer
+
 # ---- Paths ----
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SFT_ADAPTER = os.path.join(BASE_DIR, "sft_output")
 RM_ADAPTER = os.path.join(BASE_DIR, "rm", "rm_adapter")
 MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
-
-# ---- ChatML tokens ----
-U = "<|im_start|>user"
-A = "<|im_start|>assistant"
-E = "<|im_end|>"
-N = "\n"
 
 # ---- Globals ----
 sft_model = None
@@ -106,7 +102,7 @@ def ensure_models():
 
 # ---------------------------------------------------------------------------
 def do_generate(question: str, max_tokens: int = 256, temperature: float = 0.7) -> str:
-    text = f"{U}{N}{question}{E}{N}{A}{N}"
+    text = build_prompt(question)
     inputs = sft_tokenizer(text, return_tensors="pt", truncation=True, max_length=1024)
     inputs = {k: v.to(sft_model.device) for k, v in inputs.items()}
     with torch.no_grad():
@@ -117,16 +113,15 @@ def do_generate(question: str, max_tokens: int = 256, temperature: float = 0.7) 
             do_sample=temperature > 0,
             top_p=0.9,
             pad_token_id=sft_tokenizer.eos_token_id,
-        )
+    )
     full = sft_tokenizer.decode(out[0], skip_special_tokens=False)
-    answer = full.split(f"{A}{N}")[-1].replace(E, "").strip()
-    return answer
+    return strip_assistant_answer(full)
 
 
 def do_score(question: str, answer: str) -> float:
     if rm_model is None:
         return None
-    text = f"{U}{N}{question}{E}{N}{A}{N}{answer}{E}"
+    text = build_full(question, answer)
     inputs = rm_tokenizer(text, return_tensors="pt", truncation=True, max_length=1024)
     inputs = {k: v.to(rm_model.device) for k, v in inputs.items()}
     with torch.no_grad():

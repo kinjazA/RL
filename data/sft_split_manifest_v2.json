@@ -1,0 +1,21 @@
+{
+  "input": "data\\sft_clean_v2.csv",
+  "seed": 42,
+  "eval_frac": 0.08,
+  "test_frac": 0.08,
+  "paths": {
+    "train": "data\\sft_train_v2.csv",
+    "eval": "data\\sft_eval_v2.csv",
+    "test": "data\\sft_test_v2.csv"
+  },
+  "rows": {
+    "train": 4355,
+    "eval": 414,
+    "test": 411
+  },
+  "groups": {
+    "train": 4264,
+    "eval": 406,
+    "test": 406
+  }
+}

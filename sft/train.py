@@ -1,7 +1,7 @@
 """
 SFT training entry point — v2.
 Usage:
-    python -m sft.train --csv_path data/train.csv --output_dir sft_output
+    python -m sft.train --csv_path data/sft_train_v2.csv --eval_csv_path data/sft_eval_v2.csv --output_dir sft_output
 
 v2 improvements over v1:
   - Loss only on assistant tokens (DataCollatorForCompletionOnlyLM)
@@ -21,7 +21,8 @@ from .config import (
     MAX_SEQ_LENGTH,
     NEFTUNE_NOISE_ALPHA,
 )
-from .dataset_utils import load_and_format, CHATML_ASSISTANT, NL
+from .chatml import CHATML_ASSISTANT, NL
+from .dataset_utils import load_and_format
 from .model_utils import load_model_and_tokenizer
 
 # Newer TRL (>=0.9) uses SFTConfig; older uses TrainingArguments
@@ -35,8 +36,11 @@ except ImportError:
 
 def main():
     parser = argparse.ArgumentParser(description="SFT train Qwen2.5-3B with QLoRA")
-    parser.add_argument("--csv_path", required=True, help="Path to merged CSV file")
+    parser.add_argument("--csv_path", required=True, help="Path to train CSV file")
+    parser.add_argument("--eval_csv_path", default=None, help="Optional prebuilt eval CSV file")
     parser.add_argument("--output_dir", required=True, help="Where to save the LoRA adapter")
+    parser.add_argument("--learning_rate", type=float, default=None, help="Override config learning rate")
+    parser.add_argument("--num_train_epochs", type=float, default=None, help="Override config epoch count")
     args = parser.parse_args()
 
     # ---- Check GPU ----
@@ -49,7 +53,7 @@ def main():
 
     # ---- Load data ----
     print("\n[1/3] Loading dataset ...")
-    dataset = load_and_format(args.csv_path)
+    dataset = load_and_format(args.csv_path, eval_csv_path=args.eval_csv_path)
 
     # ---- Load model ----
     print("\n[2/3] Loading model with 4-bit QLoRA ...")
@@ -67,6 +71,10 @@ def main():
 
     sft_kwargs = dict(TRAINING_ARGS)
     sft_kwargs["output_dir"] = args.output_dir
+    if args.learning_rate is not None:
+        sft_kwargs["learning_rate"] = args.learning_rate
+    if args.num_train_epochs is not None:
+        sft_kwargs["num_train_epochs"] = args.num_train_epochs
 
     if _NEW_TRL:
         sft_kwargs["max_seq_length"] = MAX_SEQ_LENGTH

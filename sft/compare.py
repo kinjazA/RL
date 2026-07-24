@@ -18,7 +18,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import PeftModel
 
 from .config import MODEL_NAME, BNB_CONFIG
-from .dataset_utils import CHATML_SYSTEM, CHATML_USER, CHATML_ASSISTANT, CHATML_END, NL, SYSTEM_TEXT
+from .chatml import build_prompt, strip_assistant_answer
 
 # Test questions covering trained domains — none from train.csv
 QUESTIONS = [
@@ -35,18 +35,11 @@ QUESTIONS = [
 
 def strip_answer(full_text: str) -> str:
     """Extract the assistant's reply from a ChatML generation."""
-    marker = f"{CHATML_ASSISTANT}{NL}"
-    if marker in full_text:
-        return full_text.split(marker, 1)[-1].replace(CHATML_END, "").strip()
-    return full_text.replace(CHATML_END, "").strip()
+    return strip_assistant_answer(full_text)
 
 
 def generate(model, tokenizer, question: str, max_tokens: int = 200) -> str:
-    prompt = (
-        f"{CHATML_SYSTEM}{NL}{SYSTEM_TEXT}{CHATML_END}{NL}"
-        f"{CHATML_USER}{NL}{question}{CHATML_END}{NL}"
-        f"{CHATML_ASSISTANT}{NL}"
-    )
+    prompt = build_prompt(question)
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
 

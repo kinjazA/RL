@@ -70,7 +70,8 @@ def check_masking(csv_path: str) -> bool:
     print("=" * 64)
 
     # Locate the exact objects train.py uses
-    from sft.dataset_utils import _format_one, CHATML_ASSISTANT, NL
+    from sft.chatml import CHATML_ASSISTANT, NL
+    from sft.dataset_utils import _format_one
     from sft.config import MODEL_NAME
     from transformers import AutoTokenizer
 
