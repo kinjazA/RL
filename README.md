@@ -208,8 +208,21 @@ Use held-out prompts from `data/sft_test_v2.csv` and manually inspect:
 Quick comparison:
 
 ```bash
-python -m sft.compare --adapter_path sft_output
+python -m sft.compare --adapter_path Shawnno/RL-sft-adapter
 ```
+
+To include held-out questions sampled from `data/sft_test_v2.csv`:
+
+```bash
+python -m sft.compare \
+  --adapter_path Shawnno/RL-sft-adapter \
+  --question_set both \
+  --samples_per_source 2
+```
+
+The comparison script writes both terminal output and files under
+`compare_outputs/`. By default, held-out CSV sampling uses the target interview
+sources only; pass `--csv_sources all` to sample every source.
 
 ## Demo
 

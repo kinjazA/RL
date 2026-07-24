@@ -221,3 +221,6 @@ __marimo__/
 rm/rm_adapter/
 sft_output/
 ppo/ppo_adapter/
+
+# Local evaluation outputs
+compare_outputs/

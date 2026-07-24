@@ -111,6 +111,25 @@ Use held-out prompts from:
 data/sft_test_v2.csv
 ```
 
+Suggested Colab comparison command:
+
+```bash
+python -m sft.compare \
+  --adapter_path Shawnno/RL-sft-adapter \
+  --question_set both \
+  --samples_per_source 2
+```
+
+Outputs are saved under:
+
+```text
+compare_outputs/base_vs_sft.csv
+compare_outputs/base_vs_sft.md
+```
+
+By default, CSV sampling uses target interview sources only. Use
+`--csv_sources all` if you want to include `general_alpaca` and `general_oasst`.
+
 Acceptance focus:
 
 - Behavioral/career answers should be specific, first-person, and less templated.
