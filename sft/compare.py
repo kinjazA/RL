@@ -16,6 +16,7 @@ import argparse
 import csv
 import os
 import random
+import re
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -213,7 +214,67 @@ def load_model_and_tokenizer(args: argparse.Namespace):
     return model, tokenizer
 
 
-def generate(model, tokenizer, question: str, args: argparse.Namespace) -> str:
+def build_generation_kwargs(args: argparse.Namespace, mode: str) -> dict:
+    """Build generation kwargs for base/default SFT or strict SFT decoding."""
+    if mode == "strict":
+        max_new_tokens = args.strict_max_new_tokens
+        temperature = args.strict_temperature
+        top_p = args.strict_top_p
+        repetition_penalty = args.strict_repetition_penalty
+        no_repeat_ngram_size = args.strict_no_repeat_ngram_size
+    else:
+        max_new_tokens = args.max_new_tokens
+        temperature = args.temperature
+        top_p = args.top_p
+        repetition_penalty = args.repetition_penalty
+        no_repeat_ngram_size = args.no_repeat_ngram_size
+
+    kwargs = {
+        "max_new_tokens": max_new_tokens,
+        "pad_token_id": None,
+        "eos_token_id": None,
+    }
+    if repetition_penalty and repetition_penalty != 1.0:
+        kwargs["repetition_penalty"] = repetition_penalty
+    if no_repeat_ngram_size and no_repeat_ngram_size > 0:
+        kwargs["no_repeat_ngram_size"] = no_repeat_ngram_size
+    if temperature > 0:
+        kwargs.update({"do_sample": True, "temperature": temperature, "top_p": top_p})
+    else:
+        kwargs["do_sample"] = False
+    return kwargs
+
+
+def trim_after_leaked_question(answer: str) -> str:
+    """Trim obvious continuations where the model starts generating new questions."""
+    patterns = [
+        r"\n\s*(Tell me about|Describe a time|Can you describe|What did you learn|How do you handle|Share a situation)\b",
+        r"\s+(Tell me about|Describe a time|Can you describe|What did you learn|How do you handle|Share a situation)\b",
+    ]
+    cut = len(answer)
+    for pattern in patterns:
+        match = re.search(pattern, answer)
+        if match:
+            cut = min(cut, match.start())
+    return answer[:cut].strip()
+
+
+def answer_flags(answer: str, question: str) -> dict[str, str]:
+    lower = answer.lower()
+    question_lower = question.lower()
+    flags = {
+        "answer_chars": str(len(answer)),
+        "copies_question": str(question_lower in lower or question_lower[:40] in lower),
+        "many_question_marks": str(answer.count("?") >= 2),
+        "has_hashtags": str("#" in answer),
+        "long_repeat_always": str(lower.count("always ") >= 3),
+        "very_long": str(len(answer) > 900),
+        "trimmed_len": str(len(trim_after_leaked_question(answer))),
+    }
+    return flags
+
+
+def generate(model, tokenizer, question: str, args: argparse.Namespace, mode: str = "default") -> str:
     import torch
 
     prompt = build_prompt(question)
@@ -221,21 +282,9 @@ def generate(model, tokenizer, question: str, args: argparse.Namespace) -> str:
     device = next(model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    gen_kwargs = {
-        "max_new_tokens": args.max_new_tokens,
-        "pad_token_id": tokenizer.eos_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
-    }
-    if args.temperature > 0:
-        gen_kwargs.update(
-            {
-                "do_sample": True,
-                "temperature": args.temperature,
-                "top_p": args.top_p,
-            }
-        )
-    else:
-        gen_kwargs["do_sample"] = False
+    gen_kwargs = build_generation_kwargs(args, mode)
+    gen_kwargs["pad_token_id"] = tokenizer.eos_token_id
+    gen_kwargs["eos_token_id"] = tokenizer.eos_token_id
 
     with torch.inference_mode():
         output = model.generate(**inputs, **gen_kwargs)
@@ -245,12 +294,12 @@ def generate(model, tokenizer, question: str, args: argparse.Namespace) -> str:
 
 def compare_one(model, tokenizer, item: EvalQuestion, args: argparse.Namespace) -> dict[str, str]:
     model.disable_adapter_layers()
-    base_answer = generate(model, tokenizer, item.question, args)
+    base_answer = generate(model, tokenizer, item.question, args, mode="default")
 
     model.enable_adapter_layers()
-    sft_answer = generate(model, tokenizer, item.question, args)
+    sft_answer = generate(model, tokenizer, item.question, args, mode="default")
 
-    return {
+    row = {
         "domain": item.domain,
         "source": item.source,
         "question": item.question,
@@ -259,6 +308,13 @@ def compare_one(model, tokenizer, item: EvalQuestion, args: argparse.Namespace) 
         "base_answer": base_answer,
         "sft_answer": sft_answer,
     }
+    row.update({f"sft_{k}": v for k, v in answer_flags(sft_answer, item.question).items()})
+    if args.compare_decoding_modes:
+        strict_answer = generate(model, tokenizer, item.question, args, mode="strict")
+        row["sft_strict_answer"] = strict_answer
+        row["sft_strict_trimmed_answer"] = trim_after_leaked_question(strict_answer)
+        row.update({f"sft_strict_{k}": v for k, v in answer_flags(strict_answer, item.question).items()})
+    return row
 
 
 def print_result(row: dict[str, str]):
@@ -271,6 +327,10 @@ def print_result(row: dict[str, str]):
     print(pad)
     print(f"\nBASE:\n{row['base_answer']}\n")
     print(f"SFT:\n{row['sft_answer']}\n")
+    if "sft_strict_answer" in row:
+        print(f"SFT STRICT:\n{row['sft_strict_answer']}\n")
+        if row["sft_strict_answer"] != row["sft_strict_trimmed_answer"]:
+            print(f"SFT STRICT TRIMMED:\n{row['sft_strict_trimmed_answer']}\n")
     if row["reference"]:
         print(f"REFERENCE (held-out answer, truncated):\n{row['reference'][:700]}\n")
 
@@ -300,6 +360,12 @@ def write_markdown(rows: Iterable[dict[str, str]], path: str):
             f.write(row["base_answer"].strip() + "\n\n")
             f.write("### SFT\n\n")
             f.write(row["sft_answer"].strip() + "\n\n")
+            if "sft_strict_answer" in row:
+                f.write("### SFT Strict\n\n")
+                f.write(row["sft_strict_answer"].strip() + "\n\n")
+                if row["sft_strict_answer"] != row["sft_strict_trimmed_answer"]:
+                    f.write("### SFT Strict Trimmed\n\n")
+                    f.write(row["sft_strict_trimmed_answer"].strip() + "\n\n")
             if row["reference"]:
                 f.write("### Reference\n\n")
                 f.write(row["reference"].strip() + "\n\n")
@@ -322,6 +388,14 @@ def main():
     parser.add_argument("--max_prompt_tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=0.9)
+    parser.add_argument("--repetition_penalty", type=float, default=1.0)
+    parser.add_argument("--no_repeat_ngram_size", type=int, default=0)
+    parser.add_argument("--compare_decoding_modes", action="store_true")
+    parser.add_argument("--strict_max_new_tokens", type=int, default=150)
+    parser.add_argument("--strict_temperature", type=float, default=0.0)
+    parser.add_argument("--strict_top_p", type=float, default=0.9)
+    parser.add_argument("--strict_repetition_penalty", type=float, default=1.15)
+    parser.add_argument("--strict_no_repeat_ngram_size", type=int, default=6)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no_4bit", action="store_true", help="Disable 4-bit loading.")
     parser.add_argument("--csv_output", default=os.path.join("compare_outputs", "base_vs_sft.csv"))
@@ -332,6 +406,14 @@ def main():
     questions = select_questions(args)
     print(f"Questions: {len(questions)} ({args.question_set})")
     print(f"Generation: temperature={args.temperature}, max_new_tokens={args.max_new_tokens}")
+    if args.compare_decoding_modes:
+        print(
+            "Strict SFT generation: "
+            f"temperature={args.strict_temperature}, "
+            f"max_new_tokens={args.strict_max_new_tokens}, "
+            f"repetition_penalty={args.strict_repetition_penalty}, "
+            f"no_repeat_ngram_size={args.strict_no_repeat_ngram_size}"
+        )
 
     model, tokenizer = load_model_and_tokenizer(args)
 

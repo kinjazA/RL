@@ -117,7 +117,8 @@ Suggested Colab comparison command:
 python -m sft.compare \
   --adapter_path Shawnno/RL-sft-adapter \
   --question_set both \
-  --samples_per_source 2
+  --samples_per_source 2 \
+  --compare_decoding_modes
 ```
 
 Outputs are saved under:

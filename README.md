@@ -217,7 +217,8 @@ To include held-out questions sampled from `data/sft_test_v2.csv`:
 python -m sft.compare \
   --adapter_path Shawnno/RL-sft-adapter \
   --question_set both \
-  --samples_per_source 2
+  --samples_per_source 2 \
+  --compare_decoding_modes
 ```
 
 The comparison script writes both terminal output and files under
