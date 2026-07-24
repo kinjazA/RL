@@ -147,6 +147,22 @@ The current SFT v2 update addresses the above before retraining:
 - epochs reduced from `3` to `2`
 - SE/DS oversampling reduced from `3x` to `2x`
 
+### SFT v2 Results
+
+**Model:** [Shawnno/RL-sft-adapter](https://huggingface.co/Shawnno/RL-sft-adapter)
+
+| Metric | Value |
+|---|---:|
+| Eval loss (best) | 0.983 |
+| Eval token accuracy | 73.9% |
+| Train loss (final) | 1.036 |
+| Train token accuracy | 78.1% |
+| Epochs | 2 |
+| Train samples | 4,622 (oversampled from 4,355) |
+| Eval samples | 414 |
+| GPU | NVIDIA A40 (44 GB) |
+| Training time | ~26 min |
+
 ### Reward Model
 
 The existing reward model stage uses pairwise ranking with
