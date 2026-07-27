@@ -1,34 +1,21 @@
 """
 gen_reject.py — Generate rejected answers for RM training.
 
-Produces one rejected answer per (prompt, chosen) pair using a mix of:
-  - 70% Qwen2.5-0.5B-Instruct:  a naturally weaker model's answer
-  - 30% rule-based degradation: structural damage to the chosen answer
+Uses cleaned SFT data as chosen answers. Generates one rejected answer per
+(chosen) pair using a three-class mix:
 
-Every rejected answer (model- or rule-generated) is validated by
-is_valid_negative(): it must be non-trivial, different from the chosen answer,
-and not materially longer than it (a longer rejected text could actually be a
-better answer — the length check prevents the RM from learning "short = good").
-Invalid model outputs fall back to rule-based degradation.
+  Type A (~25%): Truncation / shuffle — teaches completeness & coherence
+  Type B (~40%): Weak model (Qwen2.5-0.5B) — natural quality differences
+  Type C (~35%): Rule-based bad samples — teaches to reject vagueness,
+                 off-topic, repetition, advice-only, and over-templated answers
 
-Rule-based degradation uses a guaranteed-safe design:
-  1. flavor strategies (truncate / mid_drop / shuffle / strip_bullets) each
-     *attempt* to degrade; if the input lacks the required structure they are
-     no-ops and let the validator reject them.
-  2. guaranteed_cut() is the structure-agnostic last-resort: it cuts to the
-     first 1/3 of words (always shorter + different for normal text), and for
-     very short inputs it duplicates the second half so the result stays valid
-     but is obviously ungrammatical. It cannot produce an invalid negative.
+Every rejected answer is validated: must differ from chosen, be non-trivial,
+and not materially longer than chosen (longer could actually be better).
 
-Verified by a deterministic sweep over all 5,558 chosen answers:
-  rule_reject() produces a valid negative for 5,558 / 5,558 (100%) — 0 identical,
-  0 too-short, 0 pathologic-length; median rejected/chosen length = 0.34.
+Input:  data/sft_clean.csv    (question, answer, source, domain, answer_type)
+Output: data/rm_train_v2.csv  (prompt, chosen, rejected, source, domain, rejected_type)
 
-Input:  data/train.csv      (question, answer, source)
-Output: data/rm_train.csv   (prompt, chosen, rejected)
-
-Hardware: GPU recommended (T4 ~1 hour)
-Usage:   python rm/gen_reject.py [--batch_size 4] [--model_ratio 0.7]
+Usage:  python rm/gen_reject.py [--batch_size 4] [--type_a_ratio 0.25] [--type_b_ratio 0.40]
 """
 
 import csv
@@ -47,46 +34,62 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(__file__)
 DATA_DIR = os.path.join(BASE_DIR, "..", "data")
-INPUT = os.path.join(DATA_DIR, "train.csv")
-OUTPUT = os.path.join(DATA_DIR, "rm_train.csv")
-CHECKPOINT = os.path.join(DATA_DIR, ".gen_reject_checkpoint.txt")
+INPUT = os.path.join(DATA_DIR, "sft_clean.csv")
+OUTPUT = os.path.join(DATA_DIR, "rm_train_v2.csv")
+CHECKPOINT = os.path.join(DATA_DIR, ".gen_reject_v2_checkpoint.txt")
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 DEFAULT_BATCH_SIZE = 4
-DEFAULT_MAX_NEW_TOKENS = 100  # short → 0.5B answers stay worse than chosen
-DEFAULT_MODEL_RATIO = 0.7
+DEFAULT_MAX_NEW_TOKENS = 80  # short → 0.5B answers stay worse than chosen
 
-SYSTEM_PROMPT = "Answer the following question very briefly, in one or two sentences. Do not elaborate."
+# Prompt for weak model: answer briefly, lower quality
+WEAK_SYSTEM = (
+    "Answer the following question very briefly, in one or two sentences. "
+    "Do not elaborate. Be vague."
+)
 
 random.seed(42)
 
 # ---------------------------------------------------------------------------
-# Rule-based degradation
+# Chosen quality filter
 # ---------------------------------------------------------------------------
-# Design: each "flavor" strategy is an ATTEMPT — it may return the text
-# unchanged if the input lacks the structure it assumes. Every attempt's
-# output passes is_valid_negative(); only strictly-worse outputs are kept.
-# If no flavor produces a valid negative, guaranteed_cut() is the
-# structure-agnostic fallback that can never fail (cuts to first 1/3 of words).
+ANY_HTML_TAG = re.compile(r"</?[a-zA-Z][a-zA-Z0-9_-]*(?:\s[^>]*)?/?>")
+AI_REFUSAL_PATS = [
+    re.compile(r"^as an ai\b", re.IGNORECASE),
+    re.compile(r"^i am an ai\b", re.IGNORECASE),
+    re.compile(r"^i cannot\b", re.IGNORECASE),
+    re.compile(r"^sorry,?\s*(?:but\s+)?i\s+(?:can'?t|cannot|am not)\b", re.IGNORECASE),
+]
 
-def truncate(text: str) -> str:
-    """Keep first 1-2 sentences. Pass-through if only one sentence."""
+def is_bad_chosen(answer: str) -> tuple[bool, str]:
+    """Return (is_bad, reason). Conservative: only filter clearly bad samples."""
+    a = answer.strip()
+    if len(a) < 50:
+        return True, "too_short"
+    if len(a) > 3000:
+        return True, "too_long"
+    if ANY_HTML_TAG.search(a):
+        return True, "has_html"
+    if a.count("?") > 3:
+        return True, "too_many_questions"
+    for pat in AI_REFUSAL_PATS:
+        if pat.search(a):
+            return True, "ai_refusal"
+    return False, ""
+
+# ---------------------------------------------------------------------------
+# Rejection type A: Truncation / Shuffle (~25%)
+# ---------------------------------------------------------------------------
+
+def _truncate(text: str) -> str:
+    """Keep first 1-2 sentences."""
     sents = re.split(r"(?<=[.!?])\s+", text)
     keep = random.randint(1, min(2, len(sents)))
     return " ".join(sents[:keep])
 
 
-def mid_drop(text: str) -> str:
-    """Drop the middle half of sentences. Pass-through if <4 sentences."""
-    sents = re.split(r"(?<=[.!?])\s+", text)
-    if len(sents) < 4:
-        return text
-    n = len(sents)
-    return " ".join(sents[: n // 4] + sents[3 * n // 4 :])
-
-
-def shuffle_paragraphs(text: str) -> str:
-    """Shuffle paragraph order. Pass-through if <2 paragraphs."""
+def _shuffle_paragraphs(text: str) -> str:
+    """Scramble paragraph order."""
     paras = [p.strip() for p in text.split("\n\n") if p.strip()]
     if len(paras) < 2:
         return text
@@ -94,63 +97,126 @@ def shuffle_paragraphs(text: str) -> str:
     return "\n\n".join(paras)
 
 
-def strip_bullets(text: str) -> str:
-    """Remove numbered/bulleted lines. Pass-through if no bullets."""
-    lines = text.split("\n")
-    kept = [l for l in lines if not re.match(r"^\s*(\d+[\.\)]|[-*•])\s", l)]
-    if kept == lines:
+def _mid_drop(text: str) -> str:
+    """Drop middle half of sentences."""
+    sents = re.split(r"(?<=[.!?])\s+", text)
+    if len(sents) < 4:
         return text
-    return "\n".join(kept)
+    n = len(sents)
+    return " ".join(sents[: n // 4] + sents[3 * n // 4 :])
 
 
-STRATEGIES = [truncate, mid_drop, shuffle_paragraphs, strip_bullets]
+TYPE_A_STRATEGIES = [
+    ("truncate", _truncate),
+    ("shuffle", _shuffle_paragraphs),
+    ("mid_drop", _mid_drop),
+]
 
-# ---- Validation ----
+
+def generate_type_a(chosen: str) -> tuple[str, str]:
+    """Try truncate/shuffle strategies; return (rejected, strategy_name)."""
+    for name, fn in random.sample(TYPE_A_STRATEGIES, len(TYPE_A_STRATEGIES)):
+        cand = fn(chosen)
+        if is_valid_negative(chosen, cand):
+            return cand, name
+    # Last resort: just take first 1-2 sentences
+    sents = re.split(r"(?<=[.!?])\s+", chosen)
+    return " ".join(sents[:2]), "truncate"
+
+
+# ---------------------------------------------------------------------------
+# Rejection type C: Rule-based bad samples (~35%)
+# ---------------------------------------------------------------------------
+
+# Pool of off-topic / vague non-answers
+_OFF_TOPIC_TEMPLATES = [
+    "I think this depends on the specific context and circumstances. Every situation is different.",
+    "That's a great question! Let me think about it and get back to you.",
+    "Hmm, I'm not entirely sure about that one. Could you clarify what you mean?",
+    "This is something that varies greatly across industries and roles.",
+    "I don't have enough information to answer that properly right now.",
+]
+
+_ADVICE_TEMPLATES = [
+    "When preparing for this question in an interview, it's important to structure your answer clearly. Start with a specific example, then explain what you did, and conclude with the result. Practice out loud beforehand.",
+    "The best way to answer this is to use the STAR method: Situation, Task, Action, Result. Make sure your answer is concise and relevant to the role.",
+    "Interviewers ask this to assess your problem-solving skills. Take a moment to think before answering, and be honest if you don't know something.",
+    "A good approach is to relate this to your past experience. Even if you haven't faced this exact situation, find something similar and explain your thought process.",
+    "Remember to keep your answer focused and professional. Don't ramble — stick to one or two key points and elaborate on those.",
+]
+
+_TEMPLATED_PREFIXES = [
+    "As a seasoned professional with extensive experience in this domain, I would approach this by leveraging my comprehensive background and proven track record. Throughout my career, I have consistently demonstrated excellence in",
+    "I am extremely passionate about this topic and have dedicated my entire career to mastering it. My approach has always been to strive for perfection while maintaining the highest standards of professionalism in",
+    "First and foremost, I would like to emphasize that I am a results-driven, detail-oriented professional with a proven ability to deliver exceptional outcomes. My methodology involves a holistic, 360-degree approach to",
+    "Having worked at multiple Fortune 500 companies, I can confidently say that my unique blend of technical expertise and business acumen sets me apart. I always begin by conducting a thorough analysis of",
+]
+
+_REPETITIVE_LINES = [
+    "This is very important for career growth. Very important indeed for anyone looking to advance. Understanding this is crucial for professional development and career advancement in today's competitive market.",
+    "I believe this is a critical skill. This is truly critical for success. Being able to handle this is critically important in the modern workplace environment.",
+    "Many people overlook this aspect. This is often overlooked by candidates. Unfortunately, most people tend to overlook this crucial element during their interview preparation.",
+]
+
+
+def _make_off_topic(chosen: str) -> str:
+    return random.choice(_OFF_TOPIC_TEMPLATES)
+
+
+def _make_advice_only(chosen: str) -> str:
+    return random.choice(_ADVICE_TEMPLATES)
+
+
+def _make_templated(chosen: str) -> str:
+    prefix = random.choice(_TEMPLATED_PREFIXES)
+    # Append a bit of the original to make it seem related
+    words = chosen.split()[:20]
+    return prefix + " " + " ".join(words)
+
+
+def _make_repetitive(chosen: str) -> str:
+    line = random.choice(_REPETITIVE_LINES)
+    return (line + " ") * 3
+
+
+def _make_vague(chosen: str) -> str:
+    words = chosen.split()[:10]
+    return "It depends on many factors. " + " ".join(words) + " and other considerations must be taken into account before reaching a conclusion. Different approaches may work for different situations."
+
+
+TYPE_C_STRATEGIES = [
+    ("off_topic", _make_off_topic),
+    ("advice_only", _make_advice_only),
+    ("templated", _make_templated),
+    ("repetitive", _make_repetitive),
+    ("vague", _make_vague),
+]
+
+
+def generate_type_c(chosen: str) -> tuple[str, str]:
+    name, fn = random.choice(TYPE_C_STRATEGIES)
+    return fn(chosen), name
+
+
+# ---------------------------------------------------------------------------
+# Shared validation
+# ---------------------------------------------------------------------------
 _MIN_NEG_LEN = 10
-_MAX_LEN_RATIO = 1.3  # rejected must not exceed 1.3x chosen (longer may be better)
 
 
 def is_valid_negative(chosen: str, rejected: str) -> bool:
-    """A valid rejected is non-trivial, different from, and not much longer than chosen."""
+    """Basic sanity: not empty, not identical to chosen."""
     if not rejected or len(rejected.strip()) < _MIN_NEG_LEN:
         return False
     if rejected.strip() == chosen.strip():
         return False
-    if len(rejected) > len(chosen) * _MAX_LEN_RATIO:
-        return False
     return True
 
 
-def guaranteed_cut(chosen: str) -> str:
-    """Structure-agnostic fallback that always produces a valid (if crude) negative.
-
-    Two modes:
-      (a) Long chosen (>= ~30 chars, >=3 words): cut to first 1/3 of words → shorter + different.
-      (b) Short chosen: can't safely shorten, so degrade by duplicating the second half,
-          which keeps it valid-length but is obviously worse / ungrammatical.
-    """
-    words = chosen.split()
-    cut_words = " ".join(words[: max(1, len(words) // 3)])
-    if len(words) >= 3 and len(cut_words) >= _MIN_NEG_LEN:
-        return cut_words
-    half = max(1, len(chosen) // 2)
-    chunk = chosen[half:]
-    return (chunk + " " + chunk).strip() or chunk or chosen
-
-
-def rule_reject(chosen: str) -> str:
-    """Return a valid negative for `chosen`, always. Flavor → validate → guaranteed fallback."""
-    for strategy in random.sample(STRATEGIES, len(STRATEGIES)):
-        cand = strategy(chosen)
-        if is_valid_negative(chosen, cand):
-            return cand
-    return guaranteed_cut(chosen)
-
-
 # ---------------------------------------------------------------------------
-# Model loading & generation
+# Model loading & generation (Type B)
 # ---------------------------------------------------------------------------
-def load_model(device: str = "auto"):
+def load_weak_model(device: str = "auto"):
     print(f"Loading {MODEL_NAME} ...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
@@ -163,13 +229,12 @@ def load_model(device: str = "auto"):
         trust_remote_code=True,
     )
     model.eval()
-    print(f"  Device: {model.device}")
     return model, tokenizer
 
 
 def generate_batch(model, tokenizer, prompts: list[str], max_new_tokens: int) -> list[str]:
     messages = [
-        [{"role": "system", "content": SYSTEM_PROMPT},
+        [{"role": "system", "content": WEAK_SYSTEM},
          {"role": "user", "content": p}]
         for p in prompts
     ]
@@ -177,7 +242,8 @@ def generate_batch(model, tokenizer, prompts: list[str], max_new_tokens: int) ->
         tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
         for m in messages
     ]
-    inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=512).to(model.device)
+    inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True,
+                       max_length=512).to(model.device)
 
     with torch.no_grad():
         outputs = model.generate(
@@ -186,7 +252,7 @@ def generate_batch(model, tokenizer, prompts: list[str], max_new_tokens: int) ->
             temperature=1.0,
             top_p=0.95,
             do_sample=True,
-            repetition_penalty=1.25,
+            repetition_penalty=1.15,
             pad_token_id=tokenizer.eos_token_id,
         )
 
@@ -218,117 +284,157 @@ def save_checkpoint(idx: int):
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--batch_size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--max_new_tokens", type=int, default=DEFAULT_MAX_NEW_TOKENS)
-    parser.add_argument("--model_ratio", type=float, default=DEFAULT_MODEL_RATIO,
-                        help="Fraction of samples to use 0.5B model for (rest use rule-based)")
+    parser.add_argument("--type_a_ratio", type=float, default=0.25)
+    parser.add_argument("--type_b_ratio", type=float, default=0.40)
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
 
-    # Load questions
-    questions = [(r["question"], r["answer"]) for r in csv.DictReader(open(INPUT, encoding="utf-8-sig"))]
+    assert abs(args.type_a_ratio + args.type_b_ratio + (1 - args.type_a_ratio - args.type_b_ratio) - 1.0) < 0.001
+
+    # ---- Load chosen answers from cleaned SFT data ----
+    rows = list(csv.DictReader(open(INPUT, encoding="utf-8-sig")))
+    print(f"Loaded {len(rows)} rows from {INPUT}")
+
+    # ---- Filter bad chosen samples ----
+    kept = []
+    filtered_reasons = {}
+    for r in rows:
+        bad, reason = is_bad_chosen(r["answer"])
+        if bad:
+            filtered_reasons[reason] = filtered_reasons.get(reason, 0) + 1
+        else:
+            kept.append(r)
+
+    print(f"  Kept: {len(kept)}  |  Filtered:")
+    for reason, count in sorted(filtered_reasons.items()):
+        print(f"    {reason}: {count}")
+
+    # ---- Assign rejection types ----
     done = load_checkpoint()
-    print(f"Loaded {len(questions)} questions" + (f" ({len(done)} already done)" if done else ""))
+    pending = [i for i in range(len(kept)) if i not in done]
 
-    # Assign strategies: True = model, False = rule
+    type_a_count = max(1, int(len(kept) * args.type_a_ratio))
+    type_b_count = max(1, int(len(kept) * args.type_b_ratio))
+    type_c_count = len(kept) - type_a_count - type_b_count
+
     assignments = {}
-    for i in range(len(questions)):
-        assignments[i] = random.random() < args.model_ratio
+    indices = list(range(len(kept)))
+    random.shuffle(indices)
+    for i in indices[:type_a_count]:
+        assignments[i] = "A"
+    for i in indices[type_a_count:type_a_count + type_b_count]:
+        assignments[i] = "B"
+    for i in indices[type_a_count + type_b_count:]:
+        assignments[i] = "C"
 
-    n_model = sum(1 for i in range(len(questions)) if assignments[i] and i not in done)
-    n_rule = sum(1 for i in range(len(questions)) if not assignments[i] and i not in done)
-    print(f"Strategy: {n_model} model-generated + {n_rule} rule-based")
-
-    # Load model (only if we have model-assigned samples remaining)
-    model = tokenizer = None
-    if n_model > 0:
-        model, tokenizer = load_model(args.device)
+    print(f"\nRejection mix:  A(trunc/shuffle)={type_a_count}  "
+          f"B(weak_model)={type_b_count}  C(rule_bad)={type_c_count}")
 
     os.makedirs(os.path.dirname(OUTPUT), exist_ok=True)
     write_header = not done
     out_f = open(OUTPUT, "w" if write_header else "a", newline="", encoding="utf-8-sig")
     writer = csv.writer(out_f)
     if write_header:
-        writer.writerow(["prompt", "chosen", "rejected"])
+        writer.writerow(["prompt", "chosen", "rejected", "source", "domain", "rejected_type"])
 
-    processed = 0
+    # ---- Type A + C: Rule-based (write immediately) ----
+    non_b_pending = [i for i in pending if assignments[i] != "B"]
+    for i in non_b_pending:
+        row = kept[i]
+        prompt, chosen = row["question"], row["answer"]
+        src, dom = row.get("source", ""), row.get("domain", "")
 
-    model_indices = []
-    model_prompts = []
-    model_chosens = []
+        if assignments[i] == "A":
+            rejected, subtype = generate_type_a(chosen)
+            rejected_type = f"A_{subtype}"
+        else:
+            rejected, subtype = generate_type_c(chosen)
+            rejected_type = f"C_{subtype}"
 
-    for i in range(len(questions)):
-        if i in done:
-            continue
+        writer.writerow([prompt, chosen, rejected, src, dom, rejected_type])
+        save_checkpoint(i)
 
-        prompt, chosen = questions[i]
+    print(f"Rule-based (A+C): {len(non_b_pending)} done")
 
-        if assignments[i]:  # model-generated
-            model_indices.append(i)
-            model_prompts.append(prompt)
-            model_chosens.append(chosen)
-        else:  # rule-based — write immediately
-            rejected = rule_reject(chosen)
-            writer.writerow([prompt, chosen, rejected])
-            save_checkpoint(i)
-            processed += 1
-
-    print(f"Rule-based: {processed} done")
-
-    # --- Pass 2: Model-generated samples (batched GPU) ---
-    if model_indices:
-        print(f"Model-generated: {len(model_indices)} remaining")
+    # ---- Type B: Weak model (batched GPU) ----
+    b_pending = [i for i in pending if assignments[i] == "B"]
+    if b_pending:
+        model, tokenizer = load_weak_model(args.device)
         batch_size = args.batch_size
-        pbar = tqdm(range(0, len(model_indices), batch_size), desc="Generating (0.5B)")
-        total_fallback = 0
+        total_retry = 0
+        pbar = tqdm(range(0, len(b_pending), batch_size), desc="Weak model (0.5B)")
 
         for start in pbar:
-            end = min(start + batch_size, len(model_indices))
-            batch_prompts = model_prompts[start:end]
-            batch_chosens = model_chosens[start:end]
-            batch_idxs = model_indices[start:end]
+            end = min(start + batch_size, len(b_pending))
+            batch_idxs = b_pending[start:end]
+            batch_prompts = [kept[i]["question"] for i in batch_idxs]
+            batch_chosens = [kept[i]["answer"] for i in batch_idxs]
 
             try:
-                rejected_list = generate_batch(model, tokenizer, batch_prompts, args.max_new_tokens)
+                generated = generate_batch(model, tokenizer, batch_prompts, args.max_new_tokens)
             except torch.cuda.OutOfMemoryError:
                 print(f"\nOOM at batch size {batch_size}. Try --batch_size {max(1, batch_size // 2)}")
                 out_f.close()
                 sys.exit(1)
 
-            n_fallback = 0
-            for idx, prompt, chosen, rejected in zip(batch_idxs, batch_prompts, batch_chosens, rejected_list):
+            n_retry = 0
+            for idx, prompt, chosen, rejected in zip(batch_idxs, batch_prompts, batch_chosens, generated):
+                row = kept[idx]
+                src, dom = row.get("source", ""), row.get("domain", "")
                 if not is_valid_negative(chosen, rejected):
-                    rejected = rule_reject(chosen)
-                    n_fallback += 1
-                writer.writerow([prompt, chosen, rejected])
+                    # Retry with fewer tokens
+                    shorter_tokens = max(20, args.max_new_tokens // 2)
+                    [retry] = generate_batch(model, tokenizer, [prompt], shorter_tokens)
+                    if is_valid_negative(chosen, retry):
+                        rejected = retry
+                        subtype = "B_weak_model"
+                    else:
+                        # Fallback to Type C — naturally bad, no cutting
+                        rejected, c_name = generate_type_c(chosen)
+                        subtype = f"B_fallback_C_{c_name}"
+                    n_retry += 1
+                else:
+                    subtype = "B_weak_model"
+                writer.writerow([prompt, chosen, rejected, src, dom, subtype])
                 save_checkpoint(idx)
-                processed += 1
-            total_fallback += n_fallback
+            total_retry += n_retry
+            pbar.set_postfix({"retry": f"{n_retry}/{len(batch_idxs)}"})
 
-            pbar.set_postfix({"done": processed, "fallback": f"{n_fallback}/{len(batch_idxs)}"})
-
-        if total_fallback:
-            print(f"  → {total_fallback} model outputs ({100*total_fallback/len(model_indices):.0f}%) fell back to rule-based")
-        print(f"Model-generated: {len(model_indices)} done")
+        if total_retry:
+            print(f"  -> {total_retry} retries ({100*total_retry/len(b_pending):.0f}%)")
+        print(f"Weak model: {len(b_pending)} done")
 
     out_f.close()
 
     if os.path.exists(CHECKPOINT):
         os.remove(CHECKPOINT)
 
-    print(f"\nTotal: {processed} RM pairs → {OUTPUT}")
+    # ---- Summary ----
+    out_rows = list(csv.DictReader(open(OUTPUT, encoding="utf-8-sig")))
+    print(f"\nDone: {len(out_rows)} pairs -> {OUTPUT}")
+    print(f"  Columns: {out_rows[0].keys()}")
 
-    # Show samples
+    from collections import Counter
+    type_counts = Counter(r["rejected_type"] for r in out_rows)
+    print("\nRejected type distribution:")
+    for t, c in sorted(type_counts.items()):
+        print(f"  {t}: {c} ({100*c/len(out_rows):.1f}%)")
+
+    domain_counts = Counter(r["domain"] for r in out_rows)
+    print("\nDomain distribution:")
+    for d, c in sorted(domain_counts.items()):
+        print(f"  {d}: {c}")
+
+    # ---- Samples ----
     print("\n--- Samples ---")
-    with open(OUTPUT, encoding="utf-8-sig") as f:
-        rows = list(csv.DictReader(f))
-        for row in random.sample(rows, min(4, len(rows))):
-            is_model = len(row["rejected"]) > len(row["chosen"]) * 0.5  # rough heuristic
-            tag = "[0.5B]" if is_model else "[rule]"
-            print(f"\n{tag} Prompt:   {row['prompt'][:100]}")
-            print(f"    Chosen:   {row['chosen'][:150]}...")
-            print(f"    Rejected: {row['rejected'][:150]}...")
+    for row in random.sample(out_rows, min(6, len(out_rows))):
+        print(f"\n[{row['rejected_type']}] [{row['domain']}] {row['prompt'][:80]}")
+        print(f"  Chosen:   {row['chosen'][:120]}...")
+        print(f"  Rejected: {row['rejected'][:120]}...")
 
 
 if __name__ == "__main__":

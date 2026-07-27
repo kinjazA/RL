@@ -479,60 +479,61 @@ data: a chosen (good) answer and a rejected (worse) answer for each prompt.
 ```bash
 python rm/gen_reject.py \
   --batch_size 4 \
-  --model_ratio 0.7 \
-  --max_new_tokens 100
+  --type_a_ratio 0.25 \
+  --type_b_ratio 0.40
 ```
 
 **What it does:**
-1. Reads `data/train.csv` (5,558 questions + answers).
-2. For each (question, chosen_answer) pair, generates a **rejected** answer via:
-   - **70% model-generated:** Qwen2.5-0.5B-Instruct answers the same question
-     with a short, low-quality response (max 100 new tokens, temperature 1.0).
-   - **30% rule-based degradation:** structural damage to the chosen answer
-     (truncation, mid-drop, shuffle paragraphs, strip bullets).
-3. Validates every rejected answer:
-   - Must be ≥10 chars and materially different from chosen.
-   - Must not be >1.3× the length of chosen (longer could actually be better).
-   - Invalid model outputs fall back to `guaranteed_cut()` (cut to first 1/3 of words).
-4. Outputs `data/rm_train.csv` with columns: `prompt`, `chosen`, `rejected`.
-5. Checkpoints progress to `data/.gen_reject_checkpoint.txt` — safe to resume if interrupted.
+1. Reads `data/sft_clean.csv` (cleaned SFT data). Filters out bad chosen samples
+   (too short < 50 chars, too long > 3000, HTML artifacts, AI refusals).
+2. For each kept (question, chosen) pair, generates a **rejected** answer.
+   Assignment is random, proportion controlled by `--type_a_ratio` / `--type_b_ratio`:
 
-**Hardware:** GPU recommended (T4 ~1 hour for 5,558 pairs). CPU possible but slow.
+**Three-class rejected mix:**
 
-**Data quality considerations (from prior RM analysis):**
+| Type | Ratio | Subtype | What it teaches |
+|------|-------|---------|-----------------|
+| **A — Truncation/Shuffle** | ~25% | `truncate`, `shuffle`, `mid_drop` | Completeness & coherence matter |
+| **B — Weak Model** | ~40% | `B_weak_model` (Qwen2.5-0.5B, short output) | Natural quality differences |
+| **C — Rule-based Bad** | ~35% | `off_topic`, `advice_only`, `templated`, `repetitive`, `vague` | Reject vagueness, templated fluff, non-answers |
 
-| Issue | Impact | Mitigation |
-|---|---|---|
-| Many rule-based negatives are just truncated answers | RM learns "short = bad", not "wrong = bad" | Model-generated negatives help, but ~30% is the floor for rule-based |
-| Chosen answers include ds_qa_treasury HTML artifacts | RM learns to prefer formatted answers | Run Phase 1 content cleaning on `train.csv` **before** generating RM data |
-| Behavioral answers dominate (29% career + 28% local_interview) | RM biased toward behavioral style | Accept for now; future: stratified sampling |
+3. Validates every rejected: ≥10 chars, different from chosen, ≤1.3× chosen length.
+   Invalid model outputs fall back to `guaranteed_cut()`.
+4. Each row carries metadata: `source`, `domain`, `rejected_type`.
+5. Outputs `data/rm_train_v2.csv` with columns:
+   `prompt`, `chosen`, `rejected`, `source`, `domain`, `rejected_type`.
 
-**To regenerate RM data with cleaned SFT data as input:**
+**Type C details:**
 
-```bash
-# First clean the data
-python scripts/sft_clean_data.py --input data/train.csv --output data/sft_clean.csv
+| Subtype | Method | Example |
+|---------|--------|---------|
+| `off_topic` | Generic non-answer | "That's a great question! Let me think about it..." |
+| `advice_only` | Meta-advice about answering, not actual answer | "Use the STAR method: Situation, Task, Action, Result..." |
+| `templated` | Over-formal cliché opening + few words from chosen | "As a seasoned professional with extensive experience..." |
+| `repetitive` | Same sentence repeated 3× | "This is very important... " × 3 |
+| `vague` | "It depends on many factors..." | Non-committal, no specifics |
 
-# Then point gen_reject.py at the cleaned data
-# (edit the INPUT path in rm/gen_reject.py, or pass --input flag if supported)
-```
+**Hardware:** GPU recommended (T4 ~1 hour for ~5,000 pairs).
 
 **Verify RM data:**
 
 ```bash
 python -c "
-import csv, random
-rows = list(csv.DictReader(open('data/rm_train.csv', encoding='utf-8-sig')))
+import csv
+from collections import Counter
+rows = list(csv.DictReader(open('data/rm_train_v2.csv', encoding='utf-8-sig')))
 print(f'Total pairs: {len(rows)}')
-# Check length distribution
-for r in random.sample(rows, min(10, len(rows))):
-    c_len, r_len = len(r['chosen']), len(r['rejected'])
-    ratio = r_len / max(1, c_len)
-    print(f'  chosen={c_len:4d}  rejected={r_len:4d}  ratio={ratio:.2f}')
+print(f'Columns: {list(rows[0].keys())}')
+types = Counter(r['rejected_type'] for r in rows)
+print('\nRejected types:')
+for t, c in sorted(types.items()):
+    print(f'  {t}: {c} ({100*c/len(rows):.1f}%)')
+domains = Counter(r['domain'] for r in rows)
+print('\nDomains:')
+for d, c in sorted(domains.items()):
+    print(f'  {d}: {c} ({100*c/len(rows):.1f}%)')
 "
 ```
-
-Expected: all ratios < 1.3, no empty rejected, no identical chosen/rejected.
 
 ### 3.2 Train Reward Model
 
@@ -542,31 +543,73 @@ python rm/train_rm.py
 
 **Architecture:**
 - Base: Qwen2.5-3B-Instruct (4-bit QLoRA)
-- Head: Linear layer on top of last hidden state → scalar reward
-- Loss: Pairwise ranking loss `-log(sigmoid(reward_chosen - reward_rejected))`
+- Model: `AutoModelForSequenceClassification` with `num_labels=1` (scalar reward)
+- Head: Linear layer on last hidden state → scalar reward
+- Loss: Pairwise ranking `-log(sigmoid(reward_chosen - reward_rejected))`
 
-**Training config (hardcoded in `rm/train_rm.py`):**
-- `per_device_train_batch_size`: 4
-- `num_train_epochs`: 3
-- `learning_rate`: 2e-4
-- `max_length`: 512
-- Train/eval split: 90/10
+**Split strategy — group-isolated (NOT random row split):**
 
-**Expected output:** `rm/rm_adapter/` (LoRA weights, ~115MB).
+Instead of `train_test_split(test_size=0.1)`, prompts are normalized and
+grouped. All rows sharing the same normalized prompt go to the same split.
+This prevents the RM from memorizing question patterns and inflating accuracy.
 
-**Previous result (v1):**
+```
+Groups shuffled → 90% groups to train, 10% to eval
+Verification: 0 groups leak across train/eval
+```
 
-| Metric | Value |
+**Training config:**
+
+| Setting | Value |
 |---|---|
-| Eval accuracy | 65.1% |
-| Eval loss | 0.697 |
-| Epochs | 3 |
+| `per_device_train_batch_size` | 2 |
+| `gradient_accumulation_steps` | 4 (effective batch = 8) |
+| `num_train_epochs` | 3 |
+| `learning_rate` | 1e-4 |
+| `lr_scheduler_type` | cosine |
+| `max_length` | 1024 |
+| `bf16` | True |
 
-> **Analysis note:** The 65.1% eval accuracy is barely above random chance (50%).
-> Prior analysis identified that many rejected answers are simply truncated
-> versions of the chosen — the RM may be learning "longer = better" rather
-> than "correct = better." RM data should be re-generated after content cleaning
-> for meaningful PPO results.
+**Expected output:**
+- `rm/rm_adapter_v2/` — LoRA weights (~115MB)
+- `rm/rm_eval_summary.json` — evaluation breakdown
+
+**Eval summary (`rm_eval_summary.json`):**
+
+```json
+{
+  "overall_accuracy": 0.XXX,
+  "total_eval_pairs": N,
+  "per_domain": {
+    "behavioral": {"accuracy": 0.XX, "correct": X, "total": Y},
+    "ml": {"accuracy": 0.XX, "correct": X, "total": Y},
+    ...
+  },
+  "per_reject_type": {
+    "A_truncate": {"accuracy": 0.XX, "correct": X, "total": Y},
+    "B_weak_model": {"accuracy": 0.XX, ...},
+    "C_off_topic": {"accuracy": 0.XX, ...},
+    ...
+  },
+  "split_info": {
+    "n_train_rows": N, "n_eval_rows": M,
+    "n_train_groups": G, "n_eval_groups": H,
+    "group_leakage": 0
+  }
+}
+```
+
+**Why per-domain/per-type accuracy matters:**
+
+Overall accuracy can be misleading. Example: if 70% of eval pairs are
+behavioral and the RM gets behavioral right but fails on ML questions, a
+single number hides this. Per-domain breakdown shows which domains the RM
+actually understands vs. memorizes.
+
+Per-reject-type accuracy shows whether the RM is learning the right
+distinctions. If `C_off_topic` has 95% accuracy but `B_weak_model` is at
+55%, the RM is mostly detecting complete non-answers, not subtle quality
+differences.
 
 ---
 
