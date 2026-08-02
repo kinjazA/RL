@@ -1,0 +1,10 @@
+{
+  "sft_train": {
+    "file_name": "sft_train.json",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  }
+}
