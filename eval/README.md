@@ -31,7 +31,7 @@ python eval/audit_overlap.py
 - `comparisons.csv`：Base/SFT 原始回答、prompt、题目元数据和评分要点。
 - `summary.json` / `summary.md`：长度统计、模型版本、解码参数，以及可选 RM 统计。
 
-本仓库是私有仓库时，先在 GitHub 创建一个只读 fine-grained personal access token，并在 Colab 左侧的 Secrets 中添加 `GITHUB_TOKEN`，同时授予当前 notebook 访问该 Secret 的权限。notebook 会通过 Python 的 `subprocess` 调用 git，不会把 token 显示在 cell 输出中。不要把 token 粘贴到代码 cell、Notebook 或 Git 仓库。
+当前仓库为公开仓库，notebook 会匿名浅克隆，不需要 GitHub token。若将来改回私有仓库，需要使用只读 GitHub token 或将项目压缩包上传到 Colab；不要把 token 粘贴到代码 cell、Notebook 或 Git 仓库。
 
 默认命令只生成 Base/SFT 回答：
 
