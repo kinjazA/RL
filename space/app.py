@@ -1,13 +1,13 @@
 """
-RLHF Pipeline Demo — Zephyr 7B.
+面试助手微调效果 Demo — Qwen2.5-3B-Instruct (LoRA SFT).
 
-Shows the same question answered by three stages of the RLHF pipeline:
-    Base (pre-SFT)  vs  SFT  vs  RLHF (DPO)
-then scores all three answers with a reward model (RM).
+三栏对比: Base(未微调) vs SFT(你的 LoRA) vs RLHF(未训练)
+然后用 reward model 给三个回答打分。
 
-Deploys to a T4 Hugging Face Space. Models load sequentially in 4-bit to
-fit 16GB VRAM. Swap the HF repo IDs in the CONFIG block to demo another
-model family.
+结构说明:
+- Base:  Qwen2.5-3B-Instruct 原版
+- SFT:   Qwen2.5-3B-Instruct + LoRA adapter (本仓库训练的面试助手)
+- RLHF:  当前未训练(项目只做了 SFT), 显示占位说明
 """
 import gc
 import os
@@ -19,22 +19,23 @@ from transformers import (
     AutoTokenizer,
     BitsAndBytesConfig,
 )
+from peft import PeftModel
 
 # --------------------------------------------------------------------------
-# CONFIG — swap these HF repo IDs to demo a different RLHF model family
+# CONFIG — 换成你自己的模型
 # --------------------------------------------------------------------------
-MODELS = {
-    "Base (pre-SFT)": "mistralai/Mistral-7B-v0.1",
-    "SFT": "HuggingFaceH4/zephyr-7b-sft-full",
-    "RLHF (DPO)": "HuggingFaceH4/zephyr-7b-beta",
-}
+BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"          # 基座(未微调)
+LORA_ADAPTER = "Shawnno/qwen2.5-3b-interview-sft-lora"  # 你的 LoRA adapter (HF 或本地路径)
 RM_MODEL = "OpenAssistant/reward-model-deberta-v3-large-v2"
 
-# Zephyr SFT/RLHF models were trained with ChatML; the base model wasn't.
-MODEL_FORMAT = {
-    "Base (pre-SFT)": "plain",
-    "SFT": "chatml",
-    "RLHF (DPO)": "chatml",
+# 三个展示位 -> (加载方式, 标签)
+#   None adapter = 纯基座
+#   具体 adapter = 基座 + LoRA
+#   "not_trained" = 占位(未训练)
+STAGES = {
+    "Base (未微调)": {"adapter": None, "desc": "Qwen2.5-3B-Instruct 原版"},
+    "SFT (面试助手)": {"adapter": LORA_ADAPTER, "desc": "基座 + LoRA SFT 微调"},
+    "RLHF (DPO)": {"adapter": "not_trained", "desc": "未训练, 留待下一步"},
 }
 
 GEN_KWARGS = dict(max_new_tokens=256, do_sample=True, temperature=0.7, top_p=0.9)
@@ -45,13 +46,7 @@ if os.path.isdir("/data"):  # HF Space persistent storage: download models once
 _device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _format_prompt(fmt: str, question: str) -> str:
-    if fmt == "chatml":
-        return f"<|user|>\n{question}\n<|assistant|>\n"
-    return f"Question: {question}\nAnswer:"
-
-
-def _load_gen(repo: str):
+def _load_gen(repo: str, adapter=None):
     qc = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_compute_dtype=torch.bfloat16,
@@ -61,6 +56,8 @@ def _load_gen(repo: str):
     tok = AutoTokenizer.from_pretrained(repo)
     tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(repo, quantization_config=qc, device_map="auto")
+    if adapter is not None:
+        model = PeftModel.from_pretrained(model, adapter)
     model.eval()
     return model, tok
 
@@ -103,14 +100,20 @@ def score_html(score) -> str:
 
 def run(question: str):
     if not question.strip():
-        return [""] * 3 + [score_html(None)] * 3
+        return ["", "", ""] + [score_html(None)] * 3
 
     answers, scores = {}, {}
-    for label in MODELS:
+    order = list(STAGES)
+    for label in order:
+        spec = STAGES[label]
+        if spec["adapter"] == "not_trained":
+            answers[label] = "（RLHF/DPO 阶段尚未训练，这是下一步计划。）"
+            scores[label] = None
+            continue
         model = tok = None
         try:
-            model, tok = _load_gen(MODELS[label])
-            prompt = _format_prompt(MODEL_FORMAT[label], question.strip())
+            model, tok = _load_gen(BASE_MODEL, spec["adapter"])
+            prompt = _format_prompt(question.strip())
             enc = tok(prompt, return_tensors="pt", truncation=True, max_length=2048).to(model.device)
             with torch.no_grad():
                 out = model.generate(**enc, pad_token_id=tok.eos_token_id, **GEN_KWARGS)
@@ -124,75 +127,78 @@ def run(question: str):
 
     try:
         rm, rmtok = _load_rm()
-        for label in MODELS:
+        for label in order:
+            if STAGES[label]["adapter"] == "not_trained":
+                continue
             scores[label] = _rm_score(rm, rmtok, question.strip(), answers[label])
     except Exception:
-        for label in MODELS:
+        for label in order:
             scores[label] = None
     finally:
         _unload(rm)
 
-    order = list(MODELS)
     return (
         answers[order[0]], answers[order[1]], answers[order[2]],
         score_html(scores[order[0]]), score_html(scores[order[1]]), score_html(scores[order[2]]),
     )
 
 
+def _format_prompt(question: str) -> str:
+    return f"<|im_start|>user\n{question}\n<|im_end|>\n<|im_start|>assistant\n"
+
+
 EXAMPLES = [
-    "Explain what the RLHF training pipeline is.",
-    "Why is the sky blue?",
-    "Write a short motivational speech for a student before an exam.",
-    "What are the benefits and risks of artificial intelligence?",
-    "Explain the difference between supervised fine-tuning and reinforcement learning.",
+    "请解释机器学习中的偏差和方差，它们分别过高时通常会出现什么现象？",
+    "请解释JVM的垃圾回收（GC）机制。什么是Minor GC、Major GC和Full GC？",
+    "有一份CSV文件包含name、age、score三列，请用Python读取它，按score降序输出前10名。要求处理文件不存在等异常。",
+    "请说一个你实际影响工作的短板，以及你在工作中采取的改进措施。",
 ]
 
-LABELS = list(MODELS)
+LABELS = list(STAGES)
 
-with gr.Blocks(title="RLHF Pipeline Demo — Zephyr 7B", theme=gr.themes.Soft()) as app:
+with gr.Blocks(title="面试助手微调效果 Demo — Qwen2.5-3B", theme=gr.themes.Soft()) as app:
     gr.Markdown(
-        f"""# RLHF Pipeline Demo
-### Same question → three pipeline stages → reward-model scores
+        f"""# 面试助手微调效果 Demo
+### 同一道面试题 → 基座 / SFT微调 / RLHF → reward-model 打分
 
-| | Model | What it is |
+| | 模型 | 说明 |
 |---|---|---|
-| **{LABELS[0]}** | `{MODELS[LABELS[0]]}` | before any fine-tuning |
-| **{LABELS[1]}** | `{MODELS[LABELS[1]]}` | after supervised fine-tuning |
-| **{LABELS[2]}** | `{MODELS[LABELS[2]]}` | after RLHF (DPO) alignment |
+| **{LABELS[0]}** | `{BASE_MODEL}` | 未微调的原始模型 |
+| **{LABELS[1]}** | 基座 + `{LORA_ADAPTER}` | QLoRA SFT 微调后的面试助手 |
+| **{LABELS[2]}** | — | 未训练（DPO/RLHF 是下一步） |
 
-All three answers are scored by the reward model `{RM_MODEL}`.
-> **First run:** models download (~45GB) and load in 4-bit. The first
-> *Generate* can take several minutes; later runs are fast.
-> Device: **{_device.upper()}**"""
+三个回答由 reward model `{RM_MODEL}` 打分。
+> **首次运行:** 下载基座+adapter (~7GB) 并以 4bit 加载，首次生成较慢，之后很快。
+> 设备: **{_device.upper()}**"""
     )
 
-    q = gr.Textbox(label="Prompt", placeholder="Type any question…", lines=3)
+    q = gr.Textbox(label="面试问题", placeholder="输入任意面试题…", lines=3)
 
     with gr.Row():
         with gr.Column(scale=3):
             gr.Markdown(f"### {LABELS[0]}")
-            out_a = gr.Textbox(label="Base answer", lines=10, interactive=False)
+            out_a = gr.Textbox(label="Base 回答", lines=10, interactive=False)
         with gr.Column(scale=1):
-            gr.Markdown("### RM score")
+            gr.Markdown("### RM 打分")
             out_a_s = gr.HTML(label="Base score")
 
     with gr.Row():
         with gr.Column(scale=3):
             gr.Markdown(f"### {LABELS[1]}")
-            out_b = gr.Textbox(label="SFT answer", lines=10, interactive=False)
+            out_b = gr.Textbox(label="SFT 回答", lines=10, interactive=False)
         with gr.Column(scale=1):
-            gr.Markdown("### RM score")
+            gr.Markdown("### RM 打分")
             out_b_s = gr.HTML(label="SFT score")
 
     with gr.Row():
         with gr.Column(scale=3):
             gr.Markdown(f"### {LABELS[2]}")
-            out_c = gr.Textbox(label="RLHF answer", lines=10, interactive=False)
+            out_c = gr.Textbox(label="RLHF 回答", lines=10, interactive=False)
         with gr.Column(scale=1):
-            gr.Markdown("### RM score")
+            gr.Markdown("### RM 打分")
             out_c_s = gr.HTML(label="RLHF score")
 
-    btn = gr.Button("Run pipeline", variant="primary")
+    btn = gr.Button("运行对比", variant="primary")
     gr.Examples(EXAMPLES, inputs=q)
 
     btn.click(run, q, [out_a, out_b, out_c, out_a_s, out_b_s, out_c_s])
