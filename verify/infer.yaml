@@ -1,0 +1,7 @@
+# 推理/验证配置: 加载基座 + LoRA adapter
+# 可指向本地 checkpoint, 也可直接指向 HF 上的模型
+model_name_or_path: Qwen/Qwen2.5-3B-Instruct
+adapter_name_or_path: Shawnno/qwen2.5-3b-interview-sft-lora
+template: qwen
+infer_backend: huggingface
+trust_remote_code: true

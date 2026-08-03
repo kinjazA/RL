@@ -32,6 +32,9 @@ RL/
   convert_llamafactory.py                     CSV → alpaca JSON 转换工具
   setup_llamafactory.py                       LLaMA-Factory 数据接入一键脚本
   sft_qwen3b.yaml                             QLoRA SFT 训练配置
+  verify/
+    verify.py                                 加载 adapter 跑真题验证风格
+    infer.yaml                                推理配置（指向 HF 上的 adapter）
   README.md                                   本文件
 ```
 
@@ -149,12 +152,34 @@ llamafactory-cli train sft_qwen3b.yaml
 
 **训练完产物**：`saves/Qwen2.5-3B-Instruct/lora/sft-cli/` 下的 checkpoint，含 `adapter_model.safetensors`（LoRA 增量权重）+ `training_loss.png`。
 
-### 4. 效果验证
+### 4. 效果验证（`verify/`）
+
+训练完用 `verify/` 目录下的脚本，从你的题库里挑不同岗位真题测风格。
 
 ```bash
-# 交互对话测风格
-llamafactory-cli chat <infer.yaml>   # infer.yaml 指向 adapter 路径
+# 方法一: 跑内置 4 类真题（算法概念 / 后端GC / 数据分析编程 / 行为面试）
+cd LLaMA-Factory
+python C:\...\RL\verify\verify.py
+
+# 方法二: 测自定义问题
+python C:\...\RL\verify\verify.py "什么是偏差和方差？"
+
+# 方法三: 交互对话（自己慢慢问）
+llamafactory-cli chat C:\...\RL\verify\infer.yaml
 ```
+
+`verify/infer.yaml` 指向 HF 上的 adapter（`Shawnno/qwen2.5-3b-interview-sft-lora`），克隆仓库即可直接用；要测本地 checkpoint 就改成你的 `adapter_name_or_path`。
+
+**验证结果（4 类真题全部风格达标）**：
+
+| 真题 | 效果 |
+|---|---|
+| 偏差-方差（算法概念） | ✅ 定义准确 → 现象冒号展开 → 点本质，完全对齐 human_seed 风格 |
+| JVM GC（后端概念） | ✅ 口语化比喻开场，Minor/Major/Full 区分清楚，CMS/G1/ZGC 逐个讲 |
+| Python CSV 排序（数据分析） | ✅ 完整代码 + try/except 异常处理 + 进阶优化思路 |
+| 行为面试（开放题） | ✅ STAR 结构完整，有起因/行动/结果/反思 |
+
+对比原始 Qwen-Instruct：开场不再「首先/其次/最后」模板、直接给定义、口语化叙述、收尾一句话点本质——微调成功学到了目标风格。
 
 ### ⚠️ 踩过的坑（重要）
 
