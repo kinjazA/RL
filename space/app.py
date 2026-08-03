@@ -125,6 +125,7 @@ def run(question: str):
             if model is not None:
                 _unload(model)
 
+    rm = rmtok = None
     try:
         rm, rmtok = _load_rm()
         for label in order:
@@ -135,7 +136,8 @@ def run(question: str):
         for label in order:
             scores[label] = None
     finally:
-        _unload(rm)
+        if rm is not None:
+            _unload(rm)
 
     return (
         answers[order[0]], answers[order[1]], answers[order[2]],
