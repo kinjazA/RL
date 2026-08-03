@@ -181,6 +181,19 @@ llamafactory-cli chat C:\...\RL\verify\infer.yaml
 
 对比原始 Qwen-Instruct：开场不再「首先/其次/最后」模板、直接给定义、口语化叙述、收尾一句话点本质——微调成功学到了目标风格。
 
+### 5. 独立评测集（`eval/`）
+
+训练题库的 3230 条样本均已参与本轮 SFT，不能再从中抽题作为最终验收。`eval/sft_test_v1.json` 因此提供 64 条独立人工编写题：8 个岗位各 8 条，包含评分要点但不包含参考答案。
+
+```bash
+# 检查候选测试题与训练题的词面近重复，生成 overlap_report_v1.csv
+python eval/audit_overlap.py
+```
+
+使用该集比较 Base 与 SFT 时，`expected_points` 只允许评分者或裁判读取，绝不能进入模型 prompt。Base 与 SFT 必须使用相同的模板、输出上限和确定性解码参数；完整使用方法见 `eval/README.md`。
+
+`eval/colab_sft_acceptance.ipynb` 可在 Colab 中直接运行 `eval/compare_base_sft.py`。脚本会导出 64 条 Base/SFT 原始回答及长度统计；RM 训练产物可作为可选的成对量化裁判接入，但 RM 分数不能替代独立评分。
+
 ### ⚠️ 踩过的坑（重要）
 
 1. **显存 OOM**：`cutoff_len: 2048` 会让 8GB 显存撑爆（激活值太大），跑到 ~160 步就崩。降到 **1024** 即可（数据中位数才 585 字符，仅 3.4% 被截断）。崩溃后 LLaMA-Factory 会从最近 checkpoint **自动续训**。
@@ -224,5 +237,6 @@ llamafactory-cli chat C:\...\RL\verify\infer.yaml
 - [x] SFT 训练（本机 RTX 4060，QLoRA）
 - [x] 效果验证（4 类真题风格达标）
 - [x] LoRA adapter 推上 HF（[Shawnno/qwen2.5-3b-interview-sft-lora](https://huggingface.co/Shawnno/qwen2.5-3b-interview-sft-lora)）
+- [x] 独立测试集（64 条，等待 Base vs SFT 批量对比）
 - [ ] 前端接入自己模型
 - [ ] 部署 Space（需付费）
