@@ -1,0 +1,44 @@
+# LLaMA-Factory SFT 训练配置
+# 用法: llamafactory-cli train sft_qwen3b.yaml
+
+### model
+model_name_or_path: Qwen/Qwen2.5-3B
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_target: all           # 3B 小模型, target=all 没压力
+
+### dataset
+dataset: sft_train
+template: qwen             # Qwen2.5 ChatML
+cutoff_len: 1024
+preprocessing_num_workers: 4
+
+### output
+output_dir: saves/qwen2.5-3b-sft
+logging_steps: 20
+save_steps: 200
+plot_loss: true
+
+### train
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 4   # effective batch = 2×4 = 8
+learning_rate: 2.0e-4            # Qwen 官方 SFT 推荐 2e-4~5e-4
+num_train_epochs: 3
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: true                       # RTX 4060 支持 bf16
+ddp_timeout: 180000000
+
+### eval (可选, 数据不多就不拆了)
+do_eval: false
+
+### QLoRA — 8GB 显存刚需
+quantization_bit: 4
+double_quantization: true
+quantization_type: nf4
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
