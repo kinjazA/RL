@@ -224,3 +224,6 @@ ppo/ppo_adapter/
 
 # Local evaluation outputs
 compare_outputs/
+
+# Generated RM preference-data artifacts (can be large and resumable)
+rm/artifacts/
