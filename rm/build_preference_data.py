@@ -50,6 +50,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument(
+        "--candidates_path",
+        type=Path,
+        default=None,
+        help="Candidate JSONL to score; defaults to output_dir/candidates.jsonl.",
+    )
+    parser.add_argument(
+        "--scored_path",
+        type=Path,
+        default=None,
+        help="Output JSONL for scores; defaults to output_dir/scored_candidates.jsonl.",
+    )
+    parser.add_argument(
         "--stage",
         choices=("all", "generate", "score", "build"),
         default="all",
@@ -73,6 +85,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top_p", type=float, default=0.9)
     parser.add_argument("--repetition_penalty", type=float, default=1.08)
     parser.add_argument("--max_new_tokens", type=int, default=384)
+    parser.add_argument(
+        "--generate_batch_size",
+        type=int,
+        default=4,
+        help="Number of prompts to generate together during the SFT sampling stage.",
+    )
     parser.add_argument("--judge_max_length", type=int, default=2048)
     parser.add_argument("--judge_batch_size", type=int, default=8)
     parser.add_argument("--min_answer_chars", type=int, default=80)
@@ -124,6 +142,8 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.min_margin < 0 or args.max_margin <= args.min_margin:
         raise ValueError("Reward-margin bounds are invalid.")
     parse_temperatures(args.temperatures)
+    if args.generate_batch_size < 1:
+        raise ValueError("--generate_batch_size must be >= 1")
     if args.stage in {"all", "generate", "score"} and not torch.cuda.is_available():
         raise RuntimeError("CUDA is required. In Colab select Runtime > Change runtime type > T4 GPU.")
 
@@ -320,6 +340,41 @@ def sample_answer(
     return tokenizer.decode(answer_ids, skip_special_tokens=True).strip(), prompt
 
 
+@torch.inference_mode()
+def sample_answer_batch(
+    model,
+    tokenizer,
+    questions: list[str],
+    temperature: float,
+    top_p: float,
+    repetition_penalty: float,
+    max_new_tokens: int,
+) -> tuple[list[str], list[str]]:
+    prompts = [policy_prompt(tokenizer, question) for question in questions]
+    inputs = tokenizer(
+        prompts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+    ).to(model_device(model))
+    output_ids = model.generate(
+        **inputs,
+        do_sample=True,
+        temperature=temperature,
+        top_p=top_p,
+        repetition_penalty=repetition_penalty,
+        max_new_tokens=max_new_tokens,
+        pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+    )
+    prompt_lengths = inputs["attention_mask"].sum(dim=1).tolist()
+    answers = [
+        tokenizer.decode(output_ids[index, length:], skip_special_tokens=True).strip()
+        for index, length in enumerate(prompt_lengths)
+    ]
+    return answers, prompts
+
+
 def candidate_key(record: dict[str, Any]) -> str:
     return f"{record['prompt_id']}::{record['candidate_id']}"
 
@@ -357,36 +412,42 @@ def run_generate(args: argparse.Namespace, prompts: list[dict[str, Any]], temper
     print(f"Loading SFT policy: {args.sft_model} + {args.sft_adapter}")
     model, tokenizer = load_policy(args.sft_model, args.sft_adapter)
     try:
-        for index, (row, candidate_id, candidate_index, temperature) in enumerate(pending, start=1):
-            generation_seed = args.seed + row["source_row"] * 100 + candidate_index
-            answer, prompt = sample_answer(
-                model=model,
-                tokenizer=tokenizer,
-                question=row["question"],
-                temperature=temperature,
-                top_p=args.top_p,
-                repetition_penalty=args.repetition_penalty,
-                max_new_tokens=args.max_new_tokens,
-                seed=generation_seed,
-            )
-            append_jsonl(
-                candidates_path,
-                [
-                    {
-                        **row,
-                        "candidate_id": candidate_id,
-                        "candidate_source": "sft_sample",
-                        "answer": answer,
-                        "temperature": temperature,
-                        "top_p": args.top_p,
-                        "repetition_penalty": args.repetition_penalty,
-                        "generation_seed": generation_seed,
-                        "generation_prompt": prompt,
-                        "created_at_utc": utc_now(),
-                    }
-                ],
-            )
-            print(f"Generated {index}/{len(pending)}: {row['prompt_id']} {candidate_id}")
+        completed = 0
+        for temperature in temperatures:
+            temperature_pending = [item for item in pending if item[3] == temperature]
+            for start in range(0, len(temperature_pending), args.generate_batch_size):
+                batch = temperature_pending[start : start + args.generate_batch_size]
+                answers, prompts_text = sample_answer_batch(
+                    model=model,
+                    tokenizer=tokenizer,
+                    questions=[item[0]["question"] for item in batch],
+                    temperature=temperature,
+                    top_p=args.top_p,
+                    repetition_penalty=args.repetition_penalty,
+                    max_new_tokens=args.max_new_tokens,
+                )
+                records = []
+                for (row, candidate_id, candidate_index, _), answer, prompt in zip(
+                    batch, answers, prompts_text, strict=True
+                ):
+                    generation_seed = args.seed + row["source_row"] * 100 + candidate_index
+                    records.append(
+                        {
+                            **row,
+                            "candidate_id": candidate_id,
+                            "candidate_source": "sft_sample",
+                            "answer": answer,
+                            "temperature": temperature,
+                            "top_p": args.top_p,
+                            "repetition_penalty": args.repetition_penalty,
+                            "generation_seed": generation_seed,
+                            "generation_prompt": prompt,
+                            "created_at_utc": utc_now(),
+                        }
+                    )
+                append_jsonl(candidates_path, records)
+                completed += len(batch)
+                print(f"Generated {completed}/{len(pending)} at temperature {temperature:g}")
     finally:
         del model
         torch.cuda.empty_cache()
@@ -434,13 +495,13 @@ def score_batch(model, tokenizer, records: list[dict[str, Any]], max_length: int
 
 
 def run_score(args: argparse.Namespace) -> None:
-    candidates_path = args.output_dir / "candidates.jsonl"
+    candidates_path = args.candidates_path or (args.output_dir / "candidates.jsonl")
     if not candidates_path.exists():
         raise FileNotFoundError(f"Run --stage generate first: {candidates_path}")
     candidates = load_jsonl(candidates_path)
     if not candidates:
         raise ValueError("Candidate file is empty.")
-    scored_path = args.output_dir / "scored_candidates.jsonl"
+    scored_path = args.scored_path or (args.output_dir / "scored_candidates.jsonl")
     existing = {candidate_key(row) for row in load_jsonl(scored_path)}
     pending = [row for row in candidates if candidate_key(row) not in existing]
     if not pending:
