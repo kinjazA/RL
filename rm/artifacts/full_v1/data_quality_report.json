@@ -1,0 +1,42 @@
+{
+  "created_at_utc": "2026-08-19T04:54:07.453718+00:00",
+  "source_input": "C:\\Users\\leeze\\Documents\\GitHub\\RL\\data\\rlhf_answers_filled.csv",
+  "selected_prompts": 3230,
+  "scored_candidates": 17251,
+  "preference_pairs": 1210,
+  "retention_rate": 0.3746,
+  "judge_model": "Skywork/Skywork-Reward-V2-Qwen3-4B",
+  "selection": {
+    "min_answer_chars": 80,
+    "max_answer_chars": 700,
+    "min_margin": 0.5,
+    "max_margin": 8.0,
+    "sample_chosen_fallback": false
+  },
+  "role_counts": {
+    "产品经理": 88,
+    "数据分析师": 227,
+    "数据工程师": 168,
+    "数据科学家": 237,
+    "测试开发工程师": 62,
+    "算法工程师": 162,
+    "软件开发工程师": 38,
+    "通用HR": 228
+  },
+  "chosen_source_counts": {
+    "sft_reference": 1210
+  },
+  "skipped": {
+    "fewer_than_two_viable_answers": 334,
+    "no_hard_negative_in_margin_band": 1686
+  },
+  "judge_margin": {
+    "count": 1210,
+    "mean": 5.1134,
+    "median": 5.25,
+    "p10": 2.5,
+    "p90": 7.375,
+    "min": 0.5,
+    "max": 8.0
+  }
+}

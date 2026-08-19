@@ -1,0 +1,12 @@
+{
+  "interview_preference_pairs": {
+    "file_name": "preference_pairs_llamafactory.json",
+    "ranking": true,
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "chosen": "chosen",
+      "rejected": "rejected"
+    }
+  }
+}
