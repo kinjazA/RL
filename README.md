@@ -242,3 +242,35 @@ python eval/audit_overlap.py
 - [x] 独立测试集（64 条，等待 Base vs SFT 批量对比）
 - [ ] 前端接入自己模型
 - [ ] 部署 Space（需付费）
+
+---
+
+## RM / DPO 当前进度（2026-08-19）
+
+已完成：
+
+- [x] 使用 SFT 模型生成全量候选回答：3230 道题，5 个温度
+- [x] 清理候选数据：删除重复 ID、空回答、异常长度和明显退化输出
+- [x] 使用 `Skywork/Skywork-Reward-V2-Qwen3-4B` 完成 17251 条候选评分
+- [x] 自动生成 1210 组 `chosen/rejected` preference pairs
+- [x] 生成 LLaMA-Factory 格式：`rm/artifacts/full_v1/preference_pairs_llamafactory.json`
+- [x] 生成审计文件：`rm/artifacts/full_v1/manual_audit.csv`
+
+当前 pair 的构造规则：原始 SFT reference 作为 `chosen`；同一道题中 Reward 分数更低、通过基础质量过滤、且分差位于 `[0.5, 8.0]` 的候选作为 `rejected`。自动筛选不是人工审核结果，正式 DPO 前必须进行 manual audit。
+
+### Manual audit 计划
+
+建议分两阶段：
+
+1. 先按岗位、难度、题型和 reward margin 分层抽查至少 200 条，覆盖所有主要类别。
+2. 如果 pilot 通过率和问题类型稳定，再审核剩余 1010 条。正式训练前建议 1210 条全部审核。
+
+每条 pair 标记为 `keep`、`remove` 或 `rewrite_rejected`。重点检查 chosen 是否覆盖 `expected_points`，rejected 是否是“正常但较差”的回答，而不是乱码、空回答、完全答非所问或仅仅更短的回答。
+
+### 后续步骤
+
+- [ ] 完成 1210 组 preference pairs 的人工审核
+- [ ] 删除或重写不合格 rejected
+- [ ] 用审核后的 pair 注册 LLaMA-Factory DPO 数据集
+- [ ] 从现有 SFT LoRA 开始进行 1 epoch DPO
+- [ ] 对比 Base / SFT / SFT+DPO，并使用独立 64 题测试集验收
