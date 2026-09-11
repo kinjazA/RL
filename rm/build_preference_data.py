@@ -646,9 +646,10 @@ def write_pair_outputs(args: argparse.Namespace, pairs: list[dict[str, Any]]) ->
 
 def write_audit_csv(path: Path, pairs: list[dict[str, Any]]) -> None:
     fields = [
-        "prompt_id", "role", "difficulty", "question_type", "source_type", "question",
+        "prompt_id", "role", "category", "skill", "difficulty", "question_type", "source_type", "question", "prompt",
         "chosen_source", "chosen_temperature", "chosen_reward", "chosen",
         "rejected_temperature", "rejected_reward", "rejected", "judge_margin",
+        "viable_candidate_count", "judge_model", "selection_policy",
     ]
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -671,7 +672,7 @@ def summary_statistics(values: list[float]) -> dict[str, float | int]:
 
 
 def run_build(args: argparse.Namespace, prompts: list[dict[str, Any]]) -> None:
-    scored_path = args.output_dir / "scored_candidates.jsonl"
+    scored_path = args.scored_path or (args.output_dir / "scored_candidates.jsonl")
     records = load_jsonl(scored_path)
     if not records:
         raise FileNotFoundError(f"Run --stage score first: {scored_path}")

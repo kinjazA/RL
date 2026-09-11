@@ -2,7 +2,7 @@
 # 用法: llamafactory-cli train sft_qwen3b.yaml
 
 ### model
-model_name_or_path: Qwen/Qwen2.5-3B
+model_name_or_path: Qwen/Qwen2.5-3B-Instruct   # 与 SFT adapter 基座一致 (adapter_config.json 实测)
 
 ### method
 stage: sft
@@ -39,6 +39,6 @@ do_eval: false
 quantization_bit: 4
 double_quantization: true
 quantization_type: nf4
-lora_rank: 16
-lora_alpha: 32
-lora_dropout: 0.05
+lora_rank: 8                      # 与 SFT adapter 一致 (rank 8 / alpha 16 / dropout 0)
+lora_alpha: 16
+lora_dropout: 0

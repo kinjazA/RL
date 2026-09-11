@@ -1,6 +1,6 @@
 # SFT Independent Evaluation Set
 
-`sft_test_v1.json` 是现有 SFT 模型的冻结独立测试集，不能被加入任何 SFT、RM 或偏好数据训练。
+`sft_test_v1.json` 是现有 SFT 模型的冻结独立测试集，不能被加入任何 SFT、RM 或偏好数据训练。该集现在也用于 **Base / SFT / SFT+DPO 三路验收**。
 
 ## 构建原则
 
@@ -28,8 +28,8 @@ python eval/audit_overlap.py
 
 `colab_sft_acceptance.ipynb` 可直接上传到 Google Colab 运行。它调用 `compare_base_sft.py`，生成以下产物：
 
-- `comparisons.csv`：Base/SFT 原始回答、prompt、题目元数据和评分要点。
-- `summary.json` / `summary.md`：长度统计、模型版本、解码参数，以及可选 RM 统计。
+- `comparisons.csv`：Base/SFT/DPO 原始回答、prompt、题目元数据和评分要点。
+- `summary.json` / `summary.md`：长度统计、150-300/150-450 命中率、自然结束率、5-gram 重复率、模型版本、解码参数，以及可选 RM 统计。
 
 当前仓库为公开仓库，notebook 会匿名浅克隆，不需要 GitHub token。若将来改回私有仓库，需要使用只读 GitHub token 或将项目压缩包上传到 Colab；不要把 token 粘贴到代码 cell、Notebook 或 Git 仓库。
 
@@ -41,6 +41,18 @@ python eval/compare_base_sft.py \
   --sft_adapter Shawnno/qwen2.5-3b-interview-sft-lora \
   --output_dir eval/results/sft_acceptance_v1
 ```
+
+DPO 训练完成后，加 `--dpo_adapter` 生成三路对比（Base / SFT / SFT+DPO）：
+
+```bash
+python eval/compare_base_sft.py \
+  --base_model Qwen/Qwen2.5-3B \
+  --sft_adapter Shawnno/qwen2.5-3b-interview-sft-lora \
+  --dpo_adapter <HF_OR_LOCAL_DPO_ADAPTER> \
+  --output_dir eval/results/dpo_acceptance_v1
+```
+
+三路验收重点看：**DPO 是否把 SFT 压下来的长度又拉长**（对比 `pct_150_450`、`median_chars` 和 `natural_ending` 三个指标），以及 RM 成对 `dpo_vs_sft` win rate 是否有正向收益。
 
 若使用 RM，必须同时给出 RM 的实际基座或完整模型、可选 LoRA adapter，以及 RM 训练时完全相同的输入拼接格式：
 

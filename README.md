@@ -32,6 +32,7 @@ RL/
   convert_llamafactory.py                     CSV → alpaca JSON 转换工具
   setup_llamafactory.py                       LLaMA-Factory 数据接入一键脚本
   sft_qwen3b.yaml                             QLoRA SFT 训练配置
+  dpo_qwen3b.yaml                             DPO 训练配置（从 SFT LoRA 起跑）
   verify/
     verify.py                                 加载 adapter 跑真题验证风格
     infer.yaml                                推理配置（指向 HF 上的 adapter）
@@ -239,13 +240,16 @@ python eval/audit_overlap.py
 - [x] SFT 训练（本机 RTX 4060，QLoRA）
 - [x] 效果验证（4 类真题风格达标）
 - [x] LoRA adapter 推上 HF（[Shawnno/qwen2.5-3b-interview-sft-lora](https://huggingface.co/Shawnno/qwen2.5-3b-interview-sft-lora)）
-- [x] 独立测试集（64 条，等待 Base vs SFT 批量对比）
+- [x] 独立测试集（64 条，用于 Base / SFT / SFT+DPO 三路验收）
+- [x] DPO 训练（从 SFT LoRA 继续，1 epoch，见下）
+- [x] 三路验收（Base vs SFT vs SFT+DPO，见下）
+- [ ] 修复偏好数据长度偏置后重训 DPO
 - [ ] 前端接入自己模型
 - [ ] 部署 Space（需付费）
 
 ---
 
-## RM / DPO 当前进度（2026-08-19）
+## RM / DPO 当前进度（2026-09-11）
 
 已完成：
 
@@ -255,22 +259,63 @@ python eval/audit_overlap.py
 - [x] 自动生成 1210 组 `chosen/rejected` preference pairs
 - [x] 生成 LLaMA-Factory 格式：`rm/artifacts/full_v1/preference_pairs_llamafactory.json`
 - [x] 生成审计文件：`rm/artifacts/full_v1/manual_audit.csv`
+- [x] 1210 组 preference pairs 人工审核通过
+- [x] DPO 训练（1 epoch，从 SFT LoRA 继续）
 
-当前 pair 的构造规则：原始 SFT reference 作为 `chosen`；同一道题中 Reward 分数更低、通过基础质量过滤、且分差位于 `[0.5, 8.0]` 的候选作为 `rejected`。自动筛选不是人工审核结果，正式 DPO 前必须进行 manual audit。
+当前 pair 的构造规则：原始 SFT reference 作为 `chosen`；同一道题中 Reward 分数更低、通过基础质量过滤、且分差位于 `[0.5, 8.0]` 的候选作为 `rejected`。自动筛选后已通过人工审核确认。
 
-### Manual audit 计划
+### Manual audit（已完成）
 
-建议分两阶段：
+1210 组 pair 已全部人工审核通过。审核重点：chosen 是否覆盖 `expected_points`，rejected 是否是“正常但较差”的回答，而不是乱码、空回答、完全答非所问或仅仅更短的回答。
 
-1. 先按岗位、难度、题型和 reward margin 分层抽查至少 200 条，覆盖所有主要类别。
-2. 如果 pilot 通过率和问题类型稳定，再审核剩余 1010 条。正式训练前建议 1210 条全部审核。
+### DPO 训练（已完成）
 
-每条 pair 标记为 `keep`、`remove` 或 `rewrite_rejected`。重点检查 chosen 是否覆盖 `expected_points`，rejected 是否是“正常但较差”的回答，而不是乱码、空回答、完全答非所问或仅仅更短的回答。
+数据注册与配置已完成（`setup_llamafactory.py` 现在会一并拷贝并注册 `interview_preference_pairs`；DPO 配置在根目录 `dpo_qwen3b.yaml`）。
+
+训练结果：152 步 / 1 epoch，约 35.5 分钟，train_loss 0.318，accuracy 0.96，无 OOM（RTX 4060 8GB 峰值 7859 MiB）。产物在 `LLaMA-Factory/saves/Qwen2.5-3B-Instruct/lora/dpo-cli/`。
+
+```bash
+# 国内网络: 走 hf-mirror 下载基座
+$env:HF_ENDPOINT = "https://hf-mirror.com"
+# 确保 llamafactory-cli 用 conda 环境 (而非 base)
+$env:PATH = "C:\Users\leeze\anaconda3\envs\llama\Scripts;C:\Users\leeze\anaconda3\envs\llama;$env:PATH"
+
+cd C:\Users\leeze\Documents\GitHub\LLaMA-Factory
+llamafactory-cli train C:\Users\leeze\Documents\GitHub\RL\dpo_qwen3b.yaml
+```
+
+关键配置说明：
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| `adapter_name_or_path` | `saves/Qwen2.5-3B-Instruct/lora/sft-cli` | 从 SFT LoRA 继续 |
+| `pref_loss` | `sigmoid` | 标准 DPO，自动把基座当参考模型（`use_ref_model=True`） |
+| `dataset` | `interview_preference_pairs` | 1210 组 pair，ranking 格式 |
+| `learning_rate` | `1e-5` | DPO 学习率远小于 SFT |
+| `num_train_epochs` | `1` | 先 1 epoch |
+| `per_device_train_batch_size` | `1` × acc 8 | 8GB 保守；DPO 同时前传 chosen+rejected，显存压力 > SFT |
+
+> ⚠️ 8GB 显存提示：标准 sigmoid DPO 会额外加载参考模型（双份前传）。如果启动即 OOM，把 `pref_loss` 改成 `simpo`（`use_ref_model=False`，省掉参考模型），其余参数不变，`dpo_label_smoothing` 需删除（仅 sigmoid 可用）。
+
+### 三路验收结果（2026-09-11）
+
+用冻结 64 题测试集对 Base / SFT / SFT+DPO 做贪心解码对比（`eval/compare_base_sft.py`）：
+
+| 指标 | Base | SFT | DPO |
+|---|---|---|---|
+| median_chars | 684.5 | 345.0 | 477.0 |
+| pct_150_450 (%) | 1.6 | 84.4 | 42.2 |
+| pct_le_550 (%) | 1.6 | 96.9 | 78.1 |
+| natural_ending (%) | 9.4 | 100.0 | 82.8 |
+| strong 5-gram repeat (%) | 90.6 | 9.4 | 25.0 |
+
+结论：**当前 DPO 把 SFT 压下来的长度又拉长了**（median 345→477，`pct_150_450` 84.4%→42.2%，自然结束率 100%→82.8%，重复率 9.4%→25%）。根因是偏好数据构造：`chosen` 100% 取 greedy SFT reference，而 reward 与长度正相关（+0.478，69% chosen 更长），DPO 学到了“更长更好”。该 checkpoint 暂不宜作为最终产出，下一步需在偏好构造中消除长度偏置后重训。
 
 ### 后续步骤
 
-- [ ] 完成 1210 组 preference pairs 的人工审核
-- [ ] 删除或重写不合格 rejected
-- [ ] 用审核后的 pair 注册 LLaMA-Factory DPO 数据集
-- [ ] 从现有 SFT LoRA 开始进行 1 epoch DPO
-- [ ] 对比 Base / SFT / SFT+DPO，并使用独立 64 题测试集验收
+- [x] 完成 1210 组 preference pairs 的人工审核
+- [x] 用审核后的 pair 注册 LLaMA-Factory DPO 数据集（`setup_llamafactory.py` 已接入）
+- [x] 编写 DPO 配置（`dpo_qwen3b.yaml`）
+- [x] 从现有 SFT LoRA 开始进行 1 epoch DPO
+- [x] 三路验收（Base / SFT / SFT+DPO，见上）
+- [ ] 修复偏好数据长度偏置：长度归一化 reward，或强制 rejected 长度 ≥ chosen，再重训 DPO

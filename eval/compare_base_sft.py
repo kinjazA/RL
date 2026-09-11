@@ -1,7 +1,8 @@
-"""Generate deterministic Base-vs-SFT comparisons on the frozen evaluation set.
+"""Generate deterministic Base-vs-SFT-vs-DPO comparisons on the frozen eval set.
 
-Optional reward-model scoring is deliberately separated from generation. The
-reward-model prompt must match the format used during RM training.
+The evaluation questions and their scoring points are never passed to the model.
+Reward-model scoring is optional and kept separate from generation; the RM prompt
+must match the format used during RM training.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import json
 import platform
 import random
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,13 +31,20 @@ from transformers import (
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EVAL_FILE = ROOT / "eval" / "sft_test_v1.json"
 
+SENTENCE_END = set("。！？….!?")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--eval_file", type=Path, default=DEFAULT_EVAL_FILE)
-    parser.add_argument("--base_model", default="Qwen/Qwen2.5-3B")
+    parser.add_argument("--base_model", default="Qwen/Qwen2.5-3B-Instruct")
     parser.add_argument(
         "--sft_adapter", default="Shawnno/qwen2.5-3b-interview-sft-lora"
+    )
+    parser.add_argument(
+        "--dpo_adapter",
+        default=None,
+        help="Optional SFT+DPO LoRA adapter. Omit to run Base-vs-SFT only.",
     )
     parser.add_argument("--output_dir", type=Path, default=ROOT / "eval" / "results" / "sft_acceptance_v1")
     parser.add_argument("--max_new_tokens", type=int, default=384)
@@ -169,8 +178,9 @@ def safe_median(values: list[int]) -> float:
     return float(np.median(values)) if values else 0.0
 
 
-def length_summary(rows: list[dict], answer_key: str) -> dict[str, float]:
-    values = [len(row[answer_key]) for row in rows]
+def length_summary(values: list[int]) -> dict[str, float]:
+    if not values:
+        return {"mean_chars": 0.0, "median_chars": 0.0, "p90_chars": 0.0, "max_chars": 0}
     return {
         "mean_chars": round(float(np.mean(values)), 2),
         "median_chars": round(safe_median(values), 2),
@@ -179,28 +189,147 @@ def length_summary(rows: list[dict], answer_key: str) -> dict[str, float]:
     }
 
 
-def reward_summary(rows: list[dict], seed: int) -> dict[str, float]:
-    base = np.array([row["rm_base"] for row in rows], dtype=float)
-    sft = np.array([row["rm_sft"] for row in rows], dtype=float)
-    delta = sft - base
-    rng = np.random.default_rng(seed)
-    indices = rng.integers(0, len(rows), size=(5000, len(rows)))
-    bootstrap_delta = delta[indices].mean(axis=1)
-    bootstrap_win = (delta[indices] > 0).mean(axis=1)
+def bucket_rates(values: list[int]) -> dict[str, float]:
+    n = len(values)
+    if not n:
+        return {"pct_150_300": 0.0, "pct_150_450": 0.0, "pct_le_550": 0.0}
     return {
-        "base_mean": round(float(base.mean()), 4),
-        "sft_mean": round(float(sft.mean()), 4),
-        "mean_delta": round(float(delta.mean()), 4),
-        "mean_delta_ci95_low": round(float(np.percentile(bootstrap_delta, 2.5)), 4),
-        "mean_delta_ci95_high": round(float(np.percentile(bootstrap_delta, 97.5)), 4),
-        "sft_win_rate": round(float((delta > 0).mean()), 4),
-        "tie_rate": round(float(np.isclose(delta, 0.0, atol=1e-6).mean()), 4),
-        "win_rate_ci95_low": round(float(np.percentile(bootstrap_win, 2.5)), 4),
-        "win_rate_ci95_high": round(float(np.percentile(bootstrap_win, 97.5)), 4),
+        "pct_150_300": round(sum(150 <= v <= 300 for v in values) / n * 100, 1),
+        "pct_150_450": round(sum(150 <= v <= 450 for v in values) / n * 100, 1),
+        "pct_le_550": round(sum(v <= 550 for v in values) / n * 100, 1),
     }
 
 
-def write_outputs(args: argparse.Namespace, rows: list[dict], summary: dict) -> None:
+def natural_ending(text: str) -> bool:
+    t = text.rstrip()
+    return bool(t) and t[-1] in SENTENCE_END
+
+
+def natural_ending_rate(values: list[str]) -> float:
+    n = len(values)
+    if not n:
+        return 0.0
+    return round(sum(natural_ending(v) for v in values) / n * 100, 1)
+
+
+def repetition_rates(values: list[str]) -> dict[str, float]:
+    n = len(values)
+    if not n:
+        return {"strong_pct": 0.0, "extreme_pct": 0.0}
+    strong = extreme = 0
+    for text in values:
+        if len(text) < 5:
+            continue
+        counts = Counter(text[i : i + 5] for i in range(len(text) - 4))
+        max_repeat = max(counts.values())
+        if max_repeat >= 4:
+            strong += 1
+        if max_repeat >= 8:
+            extreme += 1
+    return {
+        "strong_pct": round(strong / n * 100, 1),
+        "extreme_pct": round(extreme / n * 100, 1),
+    }
+
+
+def model_stats(values: list[str]) -> dict:
+    lengths = [len(v) for v in values]
+    return {
+        "length": length_summary(lengths),
+        "buckets": bucket_rates(lengths),
+        "natural_ending_pct": natural_ending_rate(values),
+        "repetition": repetition_rates(values),
+    }
+
+
+def reward_summary(rows: list[dict], seed: int, models: list[str]) -> dict[str, float]:
+    arrays = {m: np.array([row[f"rm_{m}"] for row in rows], dtype=float) for m in models}
+    out: dict[str, float] = {f"{m}_mean": round(float(v.mean()), 4) for m, v in arrays.items()}
+
+    pairs = [(a, b) for a in models for b in models if a != b]
+    rng = np.random.default_rng(seed)
+    indices = rng.integers(0, len(rows), size=(5000, len(rows)))
+    for a, b in pairs:
+        delta = arrays[a] - arrays[b]
+        boot_delta = delta[indices].mean(axis=1)
+        boot_win = (delta[indices] > 0).mean(axis=1)
+        out[f"{a}_vs_{b}_mean_delta"] = round(float(delta.mean()), 4)
+        out[f"{a}_vs_{b}_delta_ci95_low"] = round(float(np.percentile(boot_delta, 2.5)), 4)
+        out[f"{a}_vs_{b}_delta_ci95_high"] = round(float(np.percentile(boot_delta, 97.5)), 4)
+        out[f"{a}_vs_{b}_win_rate"] = round(float((delta > 0).mean()), 4)
+        out[f"{a}_vs_{b}_win_ci95_low"] = round(float(np.percentile(boot_win, 2.5)), 4)
+        out[f"{a}_vs_{b}_win_ci95_high"] = round(float(np.percentile(boot_win, 97.5)), 4)
+    return out
+
+
+def _format_num(value: float) -> str:
+    return f"{value:.1f}"
+
+
+def render_markdown(summary: dict, models: list[str]) -> str:
+    lines = [
+        "# Acceptance Summary",
+        "",
+        f"- Questions: {summary['questions']}",
+        f"- Base: `{summary['base_model']}`",
+        f"- SFT adapter: `{summary['sft_adapter']}`",
+    ]
+    if summary.get("dpo_adapter"):
+        lines.append(f"- DPO adapter: `{summary['dpo_adapter']}`")
+    lines += [
+        f"- Decoding: greedy (`do_sample=false`), max_new_tokens={summary['max_new_tokens']}",
+        "",
+        "## Length",
+        "",
+        "| Metric | " + " | ".join(m.upper() for m in models) + " |",
+        "|---|---|" + "---|" * (len(models) - 1),
+    ]
+    for metric in ("mean_chars", "median_chars", "p90_chars", "max_chars"):
+        row = [summary[m]["length"][metric] for m in models]
+        lines.append(f"| {metric} | " + " | ".join(_format_num(v) if isinstance(v, float) else str(v) for v in row) + " |")
+
+    lines += [
+        "",
+        "## Length buckets & style diagnostics",
+        "",
+        "| Metric | " + " | ".join(m.upper() for m in models) + " |",
+        "|---|---|" + "---|" * (len(models) - 1),
+    ]
+    for metric in ("pct_150_300", "pct_150_450", "pct_le_550"):
+        row = [summary[m]["buckets"][metric] for m in models]
+        lines.append(f"| {metric} (%) | " + " | ".join(_format_num(v) for v in row) + " |")
+    row = [summary[m]["natural_ending_pct"] for m in models]
+    lines.append("| natural_ending (%) | " + " | ".join(_format_num(v) for v in row) + " |")
+    for metric, label in (("strong_pct", "strong 5-gram repeat (%)"), ("extreme_pct", "extreme 5-gram repeat (%)")):
+        row = [summary[m]["repetition"][metric] for m in models]
+        lines.append(f"| {label} | " + " | ".join(_format_num(v) for v in row) + " |")
+
+    if "reward" in summary:
+        r = summary["reward"]
+        lines += [
+            "",
+            "## Reward Model (paired, not an absolute quality score)",
+            "",
+            f"- RM: `{summary['rm_model']}`",
+            f"- Input format: `{summary['rm_input_format']}`",
+            "",
+            "| Pair | Mean delta | Win rate |",
+            "|---|---|---|",
+        ]
+        for a in models:
+            for b in models:
+                if a == b:
+                    continue
+                lines.append(
+                    f"| {a.upper()} vs {b.upper()} | {r[f'{a}_vs_{b}_mean_delta']} "
+                    f"({r[f'{a}_vs_{b}_delta_ci95_low']}, {r[f'{a}_vs_{b}_delta_ci95_high']}) | "
+                    f"{r[f'{a}_vs_{b}_win_rate']} "
+                    f"({r[f'{a}_vs_{b}_win_ci95_low']}, {r[f'{a}_vs_{b}_win_ci95_high']}) |"
+                )
+    return "\n".join(lines) + "\n"
+
+
+def write_outputs(args: argparse.Namespace, rows: list[dict], summary: dict, models: list[str]) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = args.output_dir / "comparisons.csv"
     fieldnames = list(rows[0])
@@ -212,31 +341,7 @@ def write_outputs(args: argparse.Namespace, rows: list[dict], summary: dict) -> 
     (args.output_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    lines = [
-        "# Base vs SFT Acceptance Summary",
-        "",
-        f"- Questions: {summary['questions']}",
-        f"- Base: `{summary['base_model']}`",
-        f"- SFT adapter: `{summary['sft_adapter']}`",
-        f"- Decoding: greedy (`do_sample=false`), max_new_tokens={summary['max_new_tokens']}",
-        "",
-        "## Length",
-        "",
-        f"- Base: {summary['base_length']}",
-        f"- SFT: {summary['sft_length']}",
-    ]
-    if "reward_model" in summary:
-        lines.extend(
-            [
-                "",
-                "## Reward Model (paired, not an absolute quality score)",
-                "",
-                f"- RM: `{summary['reward_model']}`",
-                f"- Input format: `{summary['rm_input_format']}`",
-                f"- Stats: {summary['reward']}",
-            ]
-        )
-    (args.output_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (args.output_dir / "summary.md").write_text(render_markdown(summary, models), encoding="utf-8")
 
 
 def main() -> None:
@@ -261,6 +366,7 @@ def main() -> None:
                 "prompt": prompt,
                 "base_answer": base_answer,
                 "sft_answer": "",
+                "dpo_answer": "",
             }
         )
         print(f"Base {index}/{len(eval_rows)}: {row['id']}")
@@ -272,21 +378,34 @@ def main() -> None:
         row["sft_answer"], _ = generate_answer(sft_model, tokenizer, row["question"], args.max_new_tokens)
         print(f"SFT  {index}/{len(results)}: {row['id']}")
 
+    if args.dpo_adapter:
+        base_model = sft_model.unload()  # 卸载 sft adapter, 回到干净的 base 再挂 dpo
+        del sft_model
+        torch.cuda.empty_cache()
+        print(f"Loading DPO adapter: {args.dpo_adapter}")
+        dpo_model = PeftModel.from_pretrained(base_model, args.dpo_adapter)
+        dpo_model.eval()
+        for index, row in enumerate(results, start=1):
+            row["dpo_answer"], _ = generate_answer(dpo_model, tokenizer, row["question"], args.max_new_tokens)
+            print(f"DPO  {index}/{len(results)}: {row['id']}")
+
+    models = ["base", "sft"] + (["dpo"] if args.dpo_adapter else [])
     summary = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "questions": len(results),
         "eval_file": str(args.eval_file),
         "base_model": args.base_model,
         "sft_adapter": args.sft_adapter,
+        "dpo_adapter": args.dpo_adapter,
         "max_new_tokens": args.max_new_tokens,
         "seed": args.seed,
         "python": sys.version,
         "platform": platform.platform(),
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
-        "base_length": length_summary(results, "base_answer"),
-        "sft_length": length_summary(results, "sft_answer"),
     }
+    for m in models:
+        summary[m] = model_stats([r[f"{m}_answer"] for r in results])
 
     if args.rm_model:
         del sft_model
@@ -294,15 +413,17 @@ def main() -> None:
         print(f"Loading reward model: {args.rm_model}")
         rm_model, rm_tokenizer = load_reward_model(args.rm_model, args.rm_adapter)
         for index, row in enumerate(results, start=1):
-            row["rm_base"] = reward_score(rm_model, rm_tokenizer, row["question"], row["base_answer"], args.rm_input_format)
-            row["rm_sft"] = reward_score(rm_model, rm_tokenizer, row["question"], row["sft_answer"], args.rm_input_format)
+            for m in models:
+                row[f"rm_{m}"] = reward_score(
+                    rm_model, rm_tokenizer, row["question"], row[f"{m}_answer"], args.rm_input_format
+                )
             print(f"RM   {index}/{len(results)}: {row['id']}")
-        summary["reward_model"] = args.rm_model
+        summary["rm_model"] = args.rm_model
         summary["rm_adapter"] = args.rm_adapter
         summary["rm_input_format"] = args.rm_input_format
-        summary["reward"] = reward_summary(results, args.seed)
+        summary["reward"] = reward_summary(results, args.seed, models)
 
-    write_outputs(args, results, summary)
+    write_outputs(args, results, summary, models)
     print(f"Done. Results: {args.output_dir}")
 
 

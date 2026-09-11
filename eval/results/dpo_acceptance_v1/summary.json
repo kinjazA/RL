@@ -1,0 +1,68 @@
+{
+  "created_at_utc": "2026-09-11T10:47:42.017115+00:00",
+  "questions": 64,
+  "eval_file": "C:\\Users\\leeze\\Documents\\GitHub\\RL\\eval\\sft_test_v1.json",
+  "base_model": "Qwen/Qwen2.5-3B-Instruct",
+  "sft_adapter": "Shawnno/qwen2.5-3b-interview-sft-lora",
+  "dpo_adapter": "C:/Users/leeze/Documents/GitHub/LLaMA-Factory/saves/Qwen2.5-3B-Instruct/lora/dpo-cli",
+  "max_new_tokens": 384,
+  "seed": 20260803,
+  "python": "3.11.15 | packaged by Anaconda, Inc. | (main, Jun 11 2026, 15:12:53) [MSC v.1942 64 bit (AMD64)]",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "torch": "2.11.0+cu128",
+  "cuda": "12.8",
+  "base": {
+    "length": {
+      "mean_chars": 688.2,
+      "median_chars": 684.5,
+      "p90_chars": 728.4,
+      "max_chars": 917
+    },
+    "buckets": {
+      "pct_150_300": 0.0,
+      "pct_150_450": 1.6,
+      "pct_le_550": 1.6
+    },
+    "natural_ending_pct": 9.4,
+    "repetition": {
+      "strong_pct": 90.6,
+      "extreme_pct": 56.2
+    }
+  },
+  "sft": {
+    "length": {
+      "mean_chars": 359.06,
+      "median_chars": 345.0,
+      "p90_chars": 478.5,
+      "max_chars": 578
+    },
+    "buckets": {
+      "pct_150_300": 18.8,
+      "pct_150_450": 84.4,
+      "pct_le_550": 96.9
+    },
+    "natural_ending_pct": 100.0,
+    "repetition": {
+      "strong_pct": 9.4,
+      "extreme_pct": 0.0
+    }
+  },
+  "dpo": {
+    "length": {
+      "mean_chars": 467.61,
+      "median_chars": 477.0,
+      "p90_chars": 564.0,
+      "max_chars": 681
+    },
+    "buckets": {
+      "pct_150_300": 0.0,
+      "pct_150_450": 42.2,
+      "pct_le_550": 78.1
+    },
+    "natural_ending_pct": 82.8,
+    "repetition": {
+      "strong_pct": 25.0,
+      "extreme_pct": 0.0
+    }
+  }
+}
