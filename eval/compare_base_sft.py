@@ -34,6 +34,15 @@ DEFAULT_EVAL_FILE = ROOT / "eval" / "sft_test_v1.json"
 SENTENCE_END = set("。！？….!?")
 
 
+def ensure_natural_ending(text: str) -> str:
+    """Cut a truncated answer back to its last sentence-ending punctuation."""
+    text = text.rstrip()
+    for index in range(len(text) - 1, -1, -1):
+        if text[index] in SENTENCE_END:
+            return text[: index + 1]
+    return text
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--eval_file", type=Path, default=DEFAULT_EVAL_FILE)
@@ -47,7 +56,7 @@ def parse_args() -> argparse.Namespace:
         help="Optional SFT+DPO LoRA adapter. Omit to run Base-vs-SFT only.",
     )
     parser.add_argument("--output_dir", type=Path, default=ROOT / "eval" / "results" / "sft_acceptance_v1")
-    parser.add_argument("--max_new_tokens", type=int, default=384)
+    parser.add_argument("--max_new_tokens", type=int, default=600)
     parser.add_argument("--limit", type=int, default=0, help="Smoke-test only. 0 evaluates all questions.")
     parser.add_argument("--seed", type=int, default=20260803)
     parser.add_argument("--overwrite", action="store_true")
@@ -124,7 +133,10 @@ def generate_answer(model, tokenizer, question: str, max_new_tokens: int) -> tup
         eos_token_id=tokenizer.eos_token_id,
     )
     generated_ids = output_ids[0, inputs["input_ids"].shape[1] :]
-    return tokenizer.decode(generated_ids, skip_special_tokens=True).strip(), prompt
+    answer = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+    if generated_ids.shape[0] >= max_new_tokens:
+        answer = ensure_natural_ending(answer)
+    return answer, prompt
 
 
 def load_eval_rows(path: Path, limit: int) -> list[dict]:

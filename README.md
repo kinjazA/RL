@@ -3,8 +3,15 @@
 用 **LLaMA-Factory** 在本机（RTX 4060 8GB）微调 `Qwen2.5-3B-Instruct`，做一个面试回答助手。
 数据是 **3230 道带完整元数据的面试题**，答案按统一风格（**简单、专业、口语化，像人现场作答**）用 DeepSeek 批量生成补齐。
 
-**✅ 训练已完成**：QLoRA SFT 3 epochs，loss 2.66 → 1.54，风格验证通过。LoRA adapter 已推上 Hugging Face：
-**[Shawnno/qwen2.5-3b-interview-sft-lora](https://huggingface.co/Shawnno/qwen2.5-3b-interview-sft-lora)**
+**✅ 训练已完成**：
+
+1. **SFT**：QLoRA 3 epochs，loss 2.66 → 1.54，风格验证通过。LoRA adapter 已推上 Hugging Face：
+   **[Shawnno/qwen2.5-3b-interview-sft-lora](https://huggingface.co/Shawnno/qwen2.5-3b-interview-sft-lora)**
+2. **DPO**：在 SFT LoRA 基础上继续 sigmoid DPO（805 组**长度匹配**偏好对），1 epoch，train_loss 0.20。
+   产物在 `LLaMA-Factory/saves/Qwen2.5-3B-Instruct/lora/dpo-cli-v2/`。
+
+**三方验收（Base / SFT / SFT+DPO，64 题贪心解码）**：DPO 保住了 SFT 的简洁风格，同时修掉了旧 DPO 的两个问题——
+natural ending **82.8% → 100%**，5-gram 重复率 **25.0% → 10.9%**（回到 SFT 的 9.4% 水平）。完整过程见文末 [DPO 阶段](#dpo-阶段2026-09-12-完成)。
 
 > 相比旧版（TRL 手写 SFT→RM→PPO 管线）的改动：
 > - 训练框架换成 **LLaMA-Factory**（不再自己写训练代码）
@@ -23,14 +30,32 @@ RL/
     sft_train.json                            转好的 alpaca 格式（LLaMA-Factory 直接用）
     dataset_info.json                         LLaMA-Factory 数据集注册文件
 
+  rm/                                         偏好数据管线（RM 打分 → preference pairs）
+    build_preference_data.py                  构造 chosen/rejected 对（含长度匹配，见文末）
+    artifacts/full_v1/                        805 组 pair + 质量报告 + 审计表
+      preference_pairs_llamafactory.json      LLaMA-Factory DPO 数据（805 组）
+
+  eval/                                       独立 64 题验收
+    compare_base_sft.py                       Base / SFT / SFT+DPO 三路对比脚本
+    sft_test_v1.json                          64 条独立测试题（8 岗位 × 8）
+    audit_overlap.py                          测试集 vs 训练集词面查重
+    results/                                  历次验收结果
+      sft_acceptance_v1/                      Base vs SFT
+      dpo_acceptance_v1/                      旧 DPO（有长度回归，留档对比）
+      dpo_acceptance_v2/                      修复长度偏置后 DPO
+      dpo_acceptance_v3/                      最终（v2 + natural-ending 修复）
+
+  patches/
+    llamafactory-dpo-bf16-logits.patch        修 DPO OOM 的 LLaMA-Factory 补丁（**必打**，见文末）
+
   space/                                      前端演示（Gradio）
-    app.py                                     主界面：Base/SFT/RLHF 三栏对比 + RM 打分
+    app.py                                     主界面：Base/SFT/DPO 三栏对比 + RM 打分
     colab_demo.ipynb                           Colab 版启动（share=True 出公网链接）
     README.md                                  HF Space 部署配置（sdk: gradio, hardware: T4）
 
   generate_answers.py                         答案生成工具（DeepSeek API，断点续跑）
   convert_llamafactory.py                     CSV → alpaca JSON 转换工具
-  setup_llamafactory.py                       LLaMA-Factory 数据接入一键脚本
+  setup_llamafactory.py                       LLaMA-Factory 数据接入一键脚本（SFT + DPO 两个数据集）
   sft_qwen3b.yaml                             QLoRA SFT 训练配置
   dpo_qwen3b.yaml                             DPO 训练配置（从 SFT LoRA 起跑）
   verify/
@@ -226,10 +251,11 @@ python eval/audit_overlap.py
 
 ## 前端展示（`space/`）
 
-- 当前是 **Zephyr 7B 的 RLHF 流程对比 demo**：同一道题 → Base / SFT / RLHF 三栏回答 + RM 打分，展示"微调→对齐"让回答变好的效果
+- 同一道题 → Base / SFT / DPO 三栏回答 + RM 打分，展示“微调 → 对齐”让回答变好的效果
+- `app.py` 的 SFT 栏已加载本项目 adapter（`Shawnno/qwen2.5-3b-interview-sft-lora`）；**DPO 栏目前仍是占位文案**，待接入 `dpo-cli-v2`
+- 生成侧已加 natural-ending 兜底（`max_new_tokens=600` + 触顶回退到最后一个句号），保证回答不会说半句就断
 - 部署到 HF Space 需：**T4 显卡 + 持久存储**（HF 现在要求 PRO 或预付费 credits）
 - 本机无 GPU 时可用 `colab_demo.ipynb` 在 Colab 免费 T4 上临时跑
-- 待办：训练出自己的模型后，把 `space/app.py` 换成加载自己 adapter 的版本
 
 ---
 
@@ -241,81 +267,110 @@ python eval/audit_overlap.py
 - [x] 效果验证（4 类真题风格达标）
 - [x] LoRA adapter 推上 HF（[Shawnno/qwen2.5-3b-interview-sft-lora](https://huggingface.co/Shawnno/qwen2.5-3b-interview-sft-lora)）
 - [x] 独立测试集（64 条，用于 Base / SFT / SFT+DPO 三路验收）
-- [x] DPO 训练（从 SFT LoRA 继续，1 epoch，见下）
-- [x] 三路验收（Base vs SFT vs SFT+DPO，见下）
-- [ ] 修复偏好数据长度偏置后重训 DPO
-- [ ] 前端接入自己模型
+- [x] RM 偏好数据管线（17251 条候选评分 → 805 组**长度匹配** pair）
+- [x] 修偏好数据长度偏置 + 重训 DPO（`dpo-cli-v2`）
+- [x] 修 DPO 训练 OOM（bf16 logits 补丁，见文末）
+- [x] 修 natural ending（解码上限 + 兜底回退，见文末）
+- [x] 三路验收（Base vs SFT vs SFT+DPO，natural ending **100%**）
+- [ ] 前端接入自己模型（`space/app.py` 的 DPO 栏位目前仍是占位）
 - [ ] 部署 Space（需付费）
 
 ---
 
-## RM / DPO 当前进度（2026-09-11）
+## DPO 阶段（2026-09-12 完成）
 
-已完成：
+### 1. 偏好数据：消除长度偏置
 
-- [x] 使用 SFT 模型生成全量候选回答：3230 道题，5 个温度
-- [x] 清理候选数据：删除重复 ID、空回答、异常长度和明显退化输出
-- [x] 使用 `Skywork/Skywork-Reward-V2-Qwen3-4B` 完成 17251 条候选评分
-- [x] 自动生成 1210 组 `chosen/rejected` preference pairs
-- [x] 生成 LLaMA-Factory 格式：`rm/artifacts/full_v1/preference_pairs_llamafactory.json`
-- [x] 生成审计文件：`rm/artifacts/full_v1/manual_audit.csv`
-- [x] 1210 组 preference pairs 人工审核通过
-- [x] DPO 训练（1 epoch，从 SFT LoRA 继续）
+**问题**：v1 的 1210 组 pair 里 `chosen` 100% 取 greedy SFT reference，而 RM 分数与长度正相关，DPO 因此学到“更长更好”，把 SFT 压下来的长度又拉回去。
 
-当前 pair 的构造规则：原始 SFT reference 作为 `chosen`；同一道题中 Reward 分数更低、通过基础质量过滤、且分差位于 `[0.5, 8.0]` 的候选作为 `rejected`。自动筛选后已通过人工审核确认。
+**修复**（`rm/build_preference_data.py`）：新增 `--max_len_ratio 1.3`，要求同组内 `rejected` 与 `chosen` 长度比 ≤ 1.3，即只有“长度相当但更差”的答案才能当负例。效果：1210 → **805 组**，另有 405 组因找不到长度匹配的负例被丢弃（记录在 `data_quality_report.json` 的 `skipped.no_length_matched_negative`）。
 
-### Manual audit（已完成）
+| | v1 | v2 |
+|---|---|---|
+| pair 数 | 1210 | 805 |
+| chosen/rejected 长度比 | 未约束（69% chosen 更长） | ≤ 1.3（中位 1.13） |
 
-1210 组 pair 已全部人工审核通过。审核重点：chosen 是否覆盖 `expected_points`，rejected 是否是“正常但较差”的回答，而不是乱码、空回答、完全答非所问或仅仅更短的回答。
+pair 构造规则其余不变：原始 SFT reference 作为 `chosen`；同题中 RM 分更低、通过基础质量过滤、分差在 `[0.5, 8.0]` 的候选作为 `rejected`。
 
-### DPO 训练（已完成）
+### 2. 修 DPO 训练 OOM（关键，必打补丁）
 
-数据注册与配置已完成（`setup_llamafactory.py` 现在会一并拷贝并注册 `interview_preference_pairs`；DPO 配置在根目录 `dpo_qwen3b.yaml`）。
+**现象**：用 805 组重训时，sigmoid DPO 在**第 1 步就 OOM**；而 v1 的 1210 组当初却跑完了 152 步。配置、显存、数据长度分布都相同，所以不是“数据变长”导致的。
 
-训练结果：152 步 / 1 epoch，约 35.5 分钟，train_loss 0.318，accuracy 0.96，无 OOM（RTX 4060 8GB 峰值 7859 MiB）。产物在 `LLaMA-Factory/saves/Qwen2.5-3B-Instruct/lora/dpo-cli/`。
+**根因**（逐层定位）：
+LLaMA-Factory 在 bf16 训练下，lm_head 仍输出 **fp32 logits**。`[2, seq, 151936]` 的 logits 单张 fp32 最大约 **855MB**；sigmoid DPO 每步要算 policy + reference 两次前传，且 policy 的 logits 要留到反向传播。更关键的是 PyTorch 缓存分配器的 `reserved` 会随梯度累积**单调增长、从不回落**，实测涨到 **13354 MiB（超过 8GB 物理显存）**——显存碎片化，最终在 `log_softmax` 申请连续块时崩掉。v1 只是碎片没炸（非确定性），并非配置更好。
+
+**修复**：把 logits 降为 bf16，峰值直接减半。补丁见 [`patches/llamafactory-dpo-bf16-logits.patch`](patches/llamafactory-dpo-bf16-logits.patch)，改 LLaMA-Factory 的 `src/llamafactory/train/dpo/trainer.py` 一行：
+
+```diff
+-        all_logits = model(**batch, return_dict=True, use_cache=False).logits.to(torch.float32)
++        all_logits = model(**batch, return_dict=True, use_cache=False).logits.to(torch.bfloat16)
+```
 
 ```bash
-# 国内网络: 走 hf-mirror 下载基座
-$env:HF_ENDPOINT = "https://hf-mirror.com"
-# 确保 llamafactory-cli 用 conda 环境 (而非 base)
-$env:PATH = "C:\Users\leeze\anaconda3\envs\llama\Scripts;C:\Users\leeze\anaconda3\envs\llama;$env:PATH"
+# 应用补丁（在 LLaMA-Factory 目录下）
+cd LLaMA-Factory
+git apply ../RL/patches/llamafactory-dpo-bf16-logits.patch
+```
 
+> ⚠️ 不要用 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 兜底——该选项在 **Windows 上不支持**，会被静默忽略（日志里会出现 `expandable_segments not supported on this platform` 警告）。
+
+**结果**：打完补丁后 805 组重训一次跑完，**101 步 / 16.4 分钟，无 OOM**。
+
+### 3. DPO 重训（`dpo-cli-v2`）
+
+```bash
 cd C:\Users\leeze\Documents\GitHub\LLaMA-Factory
 llamafactory-cli train C:\Users\leeze\Documents\GitHub\RL\dpo_qwen3b.yaml
 ```
 
-关键配置说明：
+`dpo_qwen3b.yaml` 关键配置：
 
 | 参数 | 值 | 说明 |
 |---|---|---|
 | `adapter_name_or_path` | `saves/Qwen2.5-3B-Instruct/lora/sft-cli` | 从 SFT LoRA 继续 |
-| `pref_loss` | `sigmoid` | 标准 DPO，自动把基座当参考模型（`use_ref_model=True`） |
-| `dataset` | `interview_preference_pairs` | 1210 组 pair，ranking 格式 |
+| `pref_loss` | `sigmoid` | 标准 DPO；LoRA 时 `ref_model=None`，用 `disable_adapter()` 复用同一模型当参考，不额外加载基座 |
+| `dataset` | `interview_preference_pairs` | 805 组长度匹配 pair |
+| `cutoff_len` | `704` | 实测 prompt+answer 最大 655 tokens，704 全覆盖 |
+| `optim` | `adamw_torch_fused` | 与 SFT 训练一致 |
 | `learning_rate` | `1e-5` | DPO 学习率远小于 SFT |
-| `num_train_epochs` | `1` | 先 1 epoch |
-| `per_device_train_batch_size` | `1` × acc 8 | 8GB 保守；DPO 同时前传 chosen+rejected，显存压力 > SFT |
+| `num_train_epochs` | `1` | |
+| `per_device_train_batch_size` | `1` × acc 8 | 8GB 保守；DPO 同时前传 chosen+rejected，压力 > SFT |
 
-> ⚠️ 8GB 显存提示：标准 sigmoid DPO 会额外加载参考模型（双份前传）。如果启动即 OOM，把 `pref_loss` 改成 `simpo`（`use_ref_model=False`，省掉参考模型），其余参数不变，`dpo_label_smoothing` 需删除（仅 sigmoid 可用）。
+训练结果：**101 步 / 1 epoch / 16.4 分钟，train_loss 0.205，rewards/accuracies 0.99**。产物在 `LLaMA-Factory/saves/Qwen2.5-3B-Instruct/lora/dpo-cli-v2/`。
 
-### 三路验收结果（2026-09-11）
+### 4. 修 natural ending（解码侧，零重训）
 
-用冻结 64 题测试集对 Base / SFT / SFT+DPO 做贪心解码对比（`eval/compare_base_sft.py`）：
+**问题**：v2 验收时 DPO 的 natural ending 只有 85.9%。逐题排查发现：**未收尾的 9 题全部正好卡在 `max_new_tokens=384` 上限**（tokens=384~385），没有一题是模型自己“不会收尾”——纯粹是解码上限切掉了最后半句。SFT 之所以 100%，只是因为它写得短（mean 359 字），从没撞过上限。
 
-| 指标 | Base | SFT | DPO |
-|---|---|---|---|
-| median_chars | 684.5 | 345.0 | 477.0 |
-| pct_150_450 (%) | 1.6 | 84.4 | 42.2 |
-| pct_le_550 (%) | 1.6 | 96.9 | 78.1 |
-| natural_ending (%) | 9.4 | 100.0 | 82.8 |
-| strong 5-gram repeat (%) | 90.6 | 9.4 | 25.0 |
+**修复**（`eval/compare_base_sft.py` 与 `space/app.py` 同步）：
+1. `max_new_tokens` 384 → **600**，给模型留出写完的空间；
+2. 新增 `ensure_natural_ending()` 兜底：若生成触顶且末字不是 `。！？…`，回退到最后一个句号。
 
-结论：**当前 DPO 把 SFT 压下来的长度又拉长了**（median 345→477，`pct_150_450` 84.4%→42.2%，自然结束率 100%→82.8%，重复率 9.4%→25%）。根因是偏好数据构造：`chosen` 100% 取 greedy SFT reference，而 reward 与长度正相关（+0.478，69% chosen 更长），DPO 学到了“更长更好”。该 checkpoint 暂不宜作为最终产出，下一步需在偏好构造中消除长度偏置后重训。
+实测：修完后 **0/64 题触顶**（原 9/64 全部自然收尾，token 数落在 387~453），兜底逻辑根本没触发——病根就是上限太小。补出来的内容是每题的**结论句**（如“阈值策略必须跟业务成本挂钩”），不是水词。
 
-### 后续步骤
+### 5. 三路验收最终结果（2026-09-12）
 
-- [x] 完成 1210 组 preference pairs 的人工审核
-- [x] 用审核后的 pair 注册 LLaMA-Factory DPO 数据集（`setup_llamafactory.py` 已接入）
-- [x] 编写 DPO 配置（`dpo_qwen3b.yaml`）
-- [x] 从现有 SFT LoRA 开始进行 1 epoch DPO
-- [x] 三路验收（Base / SFT / SFT+DPO，见上）
-- [ ] 修复偏好数据长度偏置：长度归一化 reward，或强制 rejected 长度 ≥ chosen，再重训 DPO
+冻结 64 题、贪心解码、`max_new_tokens=600`。完整数据见 [`eval/results/dpo_acceptance_v3/`](eval/results/dpo_acceptance_v3/)。
+
+| 指标 | Base | SFT | **SFT+DPO（最终）** | 旧 DPO (v1) |
+|---|---|---|---|---|
+| median_chars | 883.0 | 345.0 | **443.0** | 477.0 |
+| p90_chars | 1069.1 | 478.5 | **570.5** | 564.0 |
+| pct_150_450 (%) | 1.6 | 84.4 | **53.1** | 42.2 |
+| pct_le_550 (%) | 1.6 | 96.9 | **84.4** | 78.1 |
+| natural_ending (%) | 100.0 | 100.0 | **100.0** | 82.8 |
+| strong 5-gram repeat (%) | 90.6 | 9.4 | **10.9** | 25.0 |
+| extreme 5-gram repeat (%) | 71.9 | 0.0 | **1.6** | 0.0 |
+
+**结论**：
+
+- ✅ **重复率修复**：strong 5-gram 重复 25.0% → **10.9%**，基本回到 SFT 的 9.4%——长度匹配消除了“越写越长、自我重复”的退化。
+- ✅ **natural ending 修复**：82.8% → **100%**（解码上限 + 兜底，零重训）。
+- ⚠️ **长度仍有残留**：median 443 vs SFT 345，DPO 仍比 SFT 长约 100 字。这是当前版本的已知取舍——多出来的是更完整的论证和结论句，不是重复。
+- 注：Base 在 `max_new_tokens=600` 下更长（median 883）是因为它本来就爱啰嗦，抬高上限后更明显；这反而让 demo 里“SFT 简洁 vs 原版啰嗦”的对比更清楚。
+
+### 后续可选方向
+
+- [ ] 进一步压 DPO 长度：收紧 `max_len_ratio`，或在偏好对里加长度惩罚项
+- [ ] `space/app.py` 的 DPO 栏位接入 `dpo-cli-v2`（目前仍是占位文案）
+- [ ] 部署 HF Space（需付费）

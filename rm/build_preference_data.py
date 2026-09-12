@@ -108,6 +108,14 @@ def parse_args() -> argparse.Namespace:
         help="Maximum teacher reward gap accepted for a hard negative.",
     )
     parser.add_argument(
+        "--max_len_ratio",
+        type=float,
+        default=1.3,
+        help="Maximum chosen/rejected length ratio allowed for a pair. Keeps the two "
+        "answers comparable in length so DPO learns content quality, not length. "
+        "1.0 requires equal length; larger values relax the constraint.",
+    )
+    parser.add_argument(
         "--no_sample_chosen_fallback",
         action="store_true",
         help="Only retain pairs whose original SFT response can be the chosen answer.",
@@ -141,6 +149,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Answer-length bounds are invalid.")
     if args.min_margin < 0 or args.max_margin <= args.min_margin:
         raise ValueError("Reward-margin bounds are invalid.")
+    if args.max_len_ratio < 1:
+        raise ValueError("--max_len_ratio must be >= 1.")
     parse_temperatures(args.temperatures)
     if args.generate_batch_size < 1:
         raise ValueError("--generate_batch_size must be >= 1")
@@ -532,6 +542,19 @@ def run_score(args: argparse.Namespace) -> None:
         torch.cuda.empty_cache()
 
 
+def answer_length(answer: str) -> int:
+    return len(normalize_text(answer))
+
+
+def length_matched(chosen: str, rejected: str, max_ratio: float) -> bool:
+    chosen_len = answer_length(chosen)
+    rejected_len = answer_length(rejected)
+    if chosen_len <= 0 or rejected_len <= 0:
+        return False
+    ratio = max(chosen_len, rejected_len) / min(chosen_len, rejected_len)
+    return ratio <= max_ratio
+
+
 def quality_flags(answer: str, min_chars: int, max_chars: int) -> list[str]:
     compact = normalize_text(answer)
     flags = []
@@ -586,28 +609,41 @@ def select_pair(
         )
 
     visited = set()
+    had_in_band = False
     for chosen in possible_chosen:
         if chosen is None or candidate_key(chosen) in visited:
             continue
         visited.add(candidate_key(chosen))
-        negatives = []
+        in_band = []
         for rejected in viable:
             if candidate_key(rejected) == candidate_key(chosen):
                 continue
             margin = chosen["judge_reward"] - rejected["judge_reward"]
             if args.min_margin <= margin <= args.max_margin:
-                negatives.append((margin, rejected))
-        if negatives:
-            # The smallest valid score gap is a useful hard negative. Quality filters
-            # above have already removed empty, looping, and wildly off-length text.
-            margin, rejected = min(negatives, key=lambda item: item[0])
-            return {
-                "chosen": chosen,
-                "rejected": rejected,
-                "margin": margin,
-                "viable_count": len(viable),
-                "chosen_source": chosen["candidate_source"],
-            }, None
+                in_band.append((margin, rejected))
+        if not in_band:
+            continue
+        had_in_band = True
+        length_matched_negatives = [
+            item
+            for item in in_band
+            if length_matched(chosen["answer"], item[1]["answer"], args.max_len_ratio)
+        ]
+        if not length_matched_negatives:
+            continue
+        # The smallest valid score gap within the length band is a useful hard
+        # negative. Quality and length filters above have already removed empty,
+        # looping, and wildly off-length text.
+        margin, rejected = min(length_matched_negatives, key=lambda item: item[0])
+        return {
+            "chosen": chosen,
+            "rejected": rejected,
+            "margin": margin,
+            "viable_count": len(viable),
+            "chosen_source": chosen["candidate_source"],
+        }, None
+    if had_in_band:
+        return None, "no_length_matched_negative"
     return None, "no_hard_negative_in_margin_band"
 
 
@@ -647,8 +683,8 @@ def write_pair_outputs(args: argparse.Namespace, pairs: list[dict[str, Any]]) ->
 def write_audit_csv(path: Path, pairs: list[dict[str, Any]]) -> None:
     fields = [
         "prompt_id", "role", "category", "skill", "difficulty", "question_type", "source_type", "question", "prompt",
-        "chosen_source", "chosen_temperature", "chosen_reward", "chosen",
-        "rejected_temperature", "rejected_reward", "rejected", "judge_margin",
+        "chosen_source", "chosen_temperature", "chosen_reward", "chosen", "chosen_len",
+        "rejected_temperature", "rejected_reward", "rejected", "rejected_len", "judge_margin", "len_ratio",
         "viable_candidate_count", "judge_model", "selection_policy",
     ]
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
@@ -689,6 +725,8 @@ def run_build(args: argparse.Namespace, prompts: list[dict[str, Any]]) -> None:
             continue
         chosen = result["chosen"]
         rejected = result["rejected"]
+        chosen_len = answer_length(chosen["answer"])
+        rejected_len = answer_length(rejected["answer"])
         pairs.append(
             {
                 "prompt_id": prompt["prompt_id"],
@@ -705,12 +743,15 @@ def run_build(args: argparse.Namespace, prompts: list[dict[str, Any]]) -> None:
                 "chosen_source": result["chosen_source"],
                 "chosen_temperature": chosen["temperature"],
                 "chosen_reward": chosen["judge_reward"],
+                "chosen_len": chosen_len,
                 "rejected_temperature": rejected["temperature"],
                 "rejected_reward": rejected["judge_reward"],
+                "rejected_len": rejected_len,
                 "judge_margin": result["margin"],
+                "len_ratio": round(max(chosen_len, rejected_len) / min(chosen_len, rejected_len), 4),
                 "viable_candidate_count": result["viable_count"],
                 "judge_model": args.judge_model,
-                "selection_policy": "reference_first_then_top_sample_hard_negative",
+                "selection_policy": "reference_first_then_top_sample_hard_negative_length_matched",
             }
         )
 
@@ -731,12 +772,14 @@ def run_build(args: argparse.Namespace, prompts: list[dict[str, Any]]) -> None:
             "max_answer_chars": args.max_answer_chars,
             "min_margin": args.min_margin,
             "max_margin": args.max_margin,
+            "max_len_ratio": args.max_len_ratio,
             "sample_chosen_fallback": not args.no_sample_chosen_fallback,
         },
         "role_counts": dict(sorted(role_counts.items())),
         "chosen_source_counts": dict(sorted(chosen_sources.items())),
         "skipped": dict(sorted(skipped.items())),
         "judge_margin": summary_statistics([pair["judge_margin"] for pair in pairs]),
+        "length_ratio": summary_statistics([pair["len_ratio"] for pair in pairs]),
     }
     write_json(args.output_dir / "data_quality_report.json", summary)
     markdown = [
@@ -747,9 +790,11 @@ def run_build(args: argparse.Namespace, prompts: list[dict[str, Any]]) -> None:
         f"- Retained preference pairs: {summary['preference_pairs']} ({summary['retention_rate']:.1%})",
         f"- Teacher judge: `{args.judge_model}`",
         f"- Margin band: [{args.min_margin}, {args.max_margin}]",
+        f"- Length ratio limit: {args.max_len_ratio}x",
         f"- Chosen sources: {summary['chosen_source_counts']}",
         f"- Skipped: {summary['skipped']}",
         f"- Reward-margin distribution: {summary['judge_margin']}",
+        f"- Length-ratio distribution: {summary['length_ratio']}",
         "",
         "`manual_audit.csv` contains every selected pair for review. Do not train a reward model before auditing a stratified sample from that file.",
     ]

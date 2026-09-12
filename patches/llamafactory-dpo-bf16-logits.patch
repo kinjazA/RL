@@ -1,0 +1,15 @@
+diff --git a/src/llamafactory/train/dpo/trainer.py b/src/llamafactory/train/dpo/trainer.py
+index 5b800a7..8f59f49 100644
+--- a/src/llamafactory/train/dpo/trainer.py
++++ b/src/llamafactory/train/dpo/trainer.py
+@@ -227,7 +227,9 @@ class CustomDPOTrainer(DPOTrainer):
+             batch = nested_detach(batch, clone=True)  # avoid error
+ 
+         labels = batch.pop("labels")  # dpo do not need compute loss in forward
+-        all_logits: torch.Tensor = model(**batch, return_dict=True, use_cache=False).logits.to(torch.float32)
++        # lm_head emits fp32 logits under bf16 training (LoRA adapter upcast); downcast to halve the
++        # [2, seq, 151936] logits before log_softmax, which is the dominant peak allocation.
++        all_logits: torch.Tensor = model(**batch, return_dict=True, use_cache=False).logits.to(torch.bfloat16)
+         all_logps, valid_length = get_batch_logps(
+             logits=all_logits, labels=labels, ld_alpha=(self.ld_alpha if not is_ref_model else None)
+         )

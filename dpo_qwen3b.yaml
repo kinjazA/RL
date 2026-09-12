@@ -1,6 +1,6 @@
 # LLaMA-Factory DPO 训练配置 (从 SFT LoRA 继续)
 # 用法: llamafactory-cli train dpo_qwen3b.yaml
-# 注意: Cutoff 降为 896、batch=1, DPO 双文本(ref+base)显存压力 > SFT。
+# 注意: 8GB 卡用 simpo(免参考模型) + cutoff 704; sigmoid 需额外加载基座做 ref, 会 OOM。
 
 ### model
 model_name_or_path: Qwen/Qwen2.5-3B-Instruct   # 必须与 SFT adapter 的基座一致 (adapter_config.json 实测)
@@ -11,17 +11,16 @@ stage: dpo
 do_train: true
 finetuning_type: lora
 lora_target: all
-pref_loss: sigmoid              # 标准 DPO, 加载参考模型(基座). 若 8GB OOM, 改 simpo 可省显存(不加载 ref)
-dpo_label_smoothing: 0.0
+pref_loss: sigmoid              # 标准 DPO; LoRA 时 ref_model=None, 不额外加载参考模型, 每步多一次 reference 前传(no_grad)
 
 ### dataset
 dataset: interview_preference_pairs
 template: qwen
-cutoff_len: 896                 # DPO 同时处理 chosen+rejected 两段, 比 SFT 前传更大, 保守调低
+cutoff_len: 704                 # 实测 prompt+answer 最大 655 tokens; 704 已 100% 覆盖并留余量, 避免 896 的空 padding 撑爆 8GB 显存
 preprocessing_num_workers: 4
 
 ### output
-output_dir: saves/Qwen2.5-3B-Instruct/lora/dpo-cli
+output_dir: saves/Qwen2.5-3B-Instruct/lora/dpo-cli-v2
 logging_steps: 20
 save_steps: 100
 plot_loss: true
@@ -34,6 +33,7 @@ num_train_epochs: 1
 lr_scheduler_type: cosine
 warmup_ratio: 0.03
 bf16: true
+optim: adamw_torch_fused        # 与第一次成功训练一致 (training_args.bin 实测 ADAMW_TORCH_FUSED)
 ddp_timeout: 180000000
 
 ### eval

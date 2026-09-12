@@ -38,12 +38,23 @@ STAGES = {
     "RLHF (DPO)": {"adapter": "not_trained", "desc": "未训练, 留待下一步"},
 }
 
-GEN_KWARGS = dict(max_new_tokens=256, do_sample=True, temperature=0.7, top_p=0.9)
+GEN_KWARGS = dict(max_new_tokens=600, do_sample=True, temperature=0.7, top_p=0.9)
 
 if os.path.isdir("/data"):  # HF Space persistent storage: download models once
     os.environ["HF_HOME"] = "/data/.cache/huggingface"
 
 _device = "cuda" if torch.cuda.is_available() else "cpu"
+
+SENTENCE_END = set("。！？….!?")
+
+
+def ensure_natural_ending(text: str) -> str:
+    """Cut a truncated answer back to its last sentence-ending punctuation."""
+    text = text.rstrip()
+    for index in range(len(text) - 1, -1, -1):
+        if text[index] in SENTENCE_END:
+            return text[: index + 1]
+    return text
 
 
 def _load_gen(repo: str, adapter=None):
@@ -118,7 +129,10 @@ def run(question: str):
             with torch.no_grad():
                 out = model.generate(**enc, pad_token_id=tok.eos_token_id, **GEN_KWARGS)
             new_tokens = out[0][enc["input_ids"].shape[1]:]
-            answers[label] = tok.decode(new_tokens, skip_special_tokens=True).strip()
+            answer = tok.decode(new_tokens, skip_special_tokens=True).strip()
+            if new_tokens.shape[0] >= GEN_KWARGS["max_new_tokens"]:
+                answer = ensure_natural_ending(answer)
+            answers[label] = answer
         except Exception as e:
             answers[label] = f"[error] {e}"
         finally:
