@@ -49,7 +49,7 @@ RL/
     llamafactory-dpo-bf16-logits.patch        修 DPO OOM 的 LLaMA-Factory 补丁（**必打**，见文末）
 
   space/                                      前端演示（Gradio）
-    app.py                                     主界面：Base/SFT/DPO 三栏对比 + RM 打分
+    app.py                                     主界面：Base/SFT/SFT+DPO 三栏对比
     colab_demo.ipynb                           Colab 版启动（share=True 出公网链接）
     README.md                                  HF Space 部署配置（sdk: gradio, hardware: T4）
 
@@ -251,11 +251,13 @@ python eval/audit_overlap.py
 
 ## 前端展示（`space/`）
 
-- 同一道题 → Base / SFT / DPO 三栏回答 + RM 打分，展示“微调 → 对齐”让回答变好的效果
-- `app.py` 的 SFT 栏已加载本项目 adapter（`Shawnno/qwen2.5-3b-interview-sft-lora`）；**DPO 栏目前仍是占位文案**，待接入 `dpo-cli-v2`
+- 同一道题 → Base / SFT / SFT+DPO 三栏回答，展示“微调 → 对齐”带来的变化
+- `app.py` 已接入公开 SFT adapter（`Shawnno/qwen2.5-3b-interview-sft-lora`）和 DPO adapter（`Shawnno/qwen2.5-3b-interview-dpo-lora`）
+- 前端只加载一次 4-bit 基座并切换两个 LoRA adapter；请求串行执行，避免并发切换 adapter 造成输出错位
+- 不再展示旧 OpenAssistant RM 的绝对分数；该 RM 与本项目不匹配，前端改为展示冻结 64 题的验收指标
 - 生成侧已加 natural-ending 兜底（`max_new_tokens=600` + 触顶回退到最后一个句号），保证回答不会说半句就断
 - 部署到 HF Space 需：**T4 显卡 + 持久存储**（HF 现在要求 PRO 或预付费 credits）
-- 本机无 GPU 时可用 `colab_demo.ipynb` 在 Colab 免费 T4 上临时跑
+- 本机无 GPU 时可用 `space/colab_demo.ipynb` 在 Colab 免费 T4 上启动同一份前端代码
 
 ---
 
@@ -272,7 +274,7 @@ python eval/audit_overlap.py
 - [x] 修 DPO 训练 OOM（bf16 logits 补丁，见文末）
 - [x] 修 natural ending（解码上限 + 兜底回退，见文末）
 - [x] 三路验收（Base vs SFT vs SFT+DPO，natural ending **100%**）
-- [ ] 前端接入自己模型（`space/app.py` 的 DPO 栏位目前仍是占位）
+- [x] 前端接入 Base / SFT / SFT+DPO 三路模型
 - [ ] 部署 Space（需付费）
 
 ---
@@ -372,5 +374,5 @@ llamafactory-cli train C:\Users\leeze\Documents\GitHub\RL\dpo_qwen3b.yaml
 ### 后续可选方向
 
 - [ ] 进一步压 DPO 长度：收紧 `max_len_ratio`，或在偏好对里加长度惩罚项
-- [ ] `space/app.py` 的 DPO 栏位接入 `dpo-cli-v2`（目前仍是占位文案）
+- [x] `space/app.py` 接入公开 DPO adapter，并改为单基座多 adapter 切换
 - [ ] 部署 HF Space（需付费）

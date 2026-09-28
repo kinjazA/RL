@@ -1,224 +1,282 @@
-"""
-面试助手微调效果 Demo — Qwen2.5-3B-Instruct (LoRA SFT).
+"""Gradio demo for the Qwen2.5-3B interview assistant training stages."""
 
-三栏对比: Base(未微调) vs SFT(你的 LoRA) vs RLHF(未训练)
-然后用 reward model 给三个回答打分。
-
-结构说明:
-- Base:  Qwen2.5-3B-Instruct 原版
-- SFT:   Qwen2.5-3B-Instruct + LoRA adapter (本仓库训练的面试助手)
-- RLHF:  当前未训练(项目只做了 SFT), 显示占位说明
-"""
-import gc
 import os
-import torch
+
+if os.path.isdir("/data"):
+    os.environ.setdefault("HF_HOME", "/data/.cache/huggingface")
+
+import gc
+import threading
+import time
+from contextlib import nullcontext
+
 import gradio as gr
-from transformers import (
-    AutoModelForCausalLM,
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-)
+import torch
 from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-# --------------------------------------------------------------------------
-# CONFIG — 换成你自己的模型
-# --------------------------------------------------------------------------
-BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"          # 基座(未微调)
-LORA_ADAPTER = "Shawnno/qwen2.5-3b-interview-sft-lora"  # 你的 LoRA adapter (HF 或本地路径)
-RM_MODEL = "OpenAssistant/reward-model-deberta-v3-large-v2"
 
-# 三个展示位 -> (加载方式, 标签)
-#   None adapter = 纯基座
-#   具体 adapter = 基座 + LoRA
-#   "not_trained" = 占位(未训练)
-STAGES = {
-    "Base (未微调)": {"adapter": None, "desc": "Qwen2.5-3B-Instruct 原版"},
-    "SFT (面试助手)": {"adapter": LORA_ADAPTER, "desc": "基座 + LoRA SFT 微调"},
-    "RLHF (DPO)": {"adapter": "not_trained", "desc": "未训练, 留待下一步"},
-}
+BASE_MODEL = os.getenv("BASE_MODEL", "Qwen/Qwen2.5-3B-Instruct")
+SFT_ADAPTER = os.getenv(
+    "SFT_ADAPTER", "Shawnno/qwen2.5-3b-interview-sft-lora"
+)
+DPO_ADAPTER = os.getenv(
+    "DPO_ADAPTER", "Shawnno/qwen2.5-3b-interview-dpo-lora"
+)
 
-GEN_KWARGS = dict(max_new_tokens=600, do_sample=True, temperature=0.7, top_p=0.9)
-
-if os.path.isdir("/data"):  # HF Space persistent storage: download models once
-    os.environ["HF_HOME"] = "/data/.cache/huggingface"
+STAGES = (
+    ("Base", None),
+    ("SFT", "sft"),
+    ("SFT + DPO", "dpo"),
+)
+SENTENCE_END = set("。！？….!?")
 
 _device = "cuda" if torch.cuda.is_available() else "cpu"
+_model = None
+_tokenizer = None
+_load_lock = threading.Lock()
+_generation_lock = threading.Lock()
 
-SENTENCE_END = set("。！？….!?")
+
+def _load_runtime():
+    """Load one quantized base model and register both LoRA adapters once."""
+    global _model, _tokenizer
+    if _model is not None:
+        return _model, _tokenizer
+
+    with _load_lock:
+        if _model is not None:
+            return _model, _tokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        load_kwargs = {"device_map": "auto", "low_cpu_mem_usage": True}
+        if torch.cuda.is_available():
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+            )
+        else:
+            load_kwargs["torch_dtype"] = torch.float32
+
+        base_model = AutoModelForCausalLM.from_pretrained(BASE_MODEL, **load_kwargs)
+        model = PeftModel.from_pretrained(
+            base_model,
+            SFT_ADAPTER,
+            adapter_name="sft",
+            is_trainable=False,
+        )
+        model.load_adapter(DPO_ADAPTER, adapter_name="dpo", is_trainable=False)
+        model.eval()
+        model.config.use_cache = True
+
+        _model = model
+        _tokenizer = tokenizer
+        return _model, _tokenizer
 
 
 def ensure_natural_ending(text: str) -> str:
-    """Cut a truncated answer back to its last sentence-ending punctuation."""
+    """Cut a length-limited answer back to its last complete sentence."""
     text = text.rstrip()
+    if not text or text[-1] in SENTENCE_END:
+        return text
     for index in range(len(text) - 1, -1, -1):
         if text[index] in SENTENCE_END:
             return text[: index + 1]
     return text
 
 
-def _load_gen(repo: str, adapter=None):
-    qc = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,
+def _generate(
+    model,
+    tokenizer,
+    question: str,
+    adapter_name: str | None,
+    mode: str,
+    temperature: float,
+    top_p: float,
+    max_new_tokens: int,
+) -> tuple[str, float]:
+    messages = [{"role": "user", "content": question}]
+    prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
     )
-    tok = AutoTokenizer.from_pretrained(repo)
-    tok.pad_token = tok.eos_token
-    model = AutoModelForCausalLM.from_pretrained(repo, quantization_config=qc, device_map="auto")
-    if adapter is not None:
-        model = PeftModel.from_pretrained(model, adapter)
-    model.eval()
-    return model, tok
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        truncation=True,
+        max_length=2048,
+    ).to(model.device)
 
+    generate_kwargs = {
+        "max_new_tokens": int(max_new_tokens),
+        "do_sample": mode == "自由采样",
+        "pad_token_id": tokenizer.eos_token_id,
+    }
+    if generate_kwargs["do_sample"]:
+        generate_kwargs.update(temperature=float(temperature), top_p=float(top_p))
 
-def _unload(model):
-    del model
-    gc.collect()
-    torch.cuda.empty_cache()
-
-
-def _load_rm():
-    tok = AutoTokenizer.from_pretrained(RM_MODEL)
-    model = AutoModelForSequenceClassification.from_pretrained(RM_MODEL)
-    model.eval()
-    return model, tok
-
-
-def _rm_score(model, tok, question: str, answer: str):
-    text = f"{question}\n\n{answer}"
-    enc = tok(text, return_tensors="pt", truncation=True, max_length=1024).to(model.device)
-    with torch.no_grad():
-        return model(**enc).logits[0, 0].item()
-
-
-def score_html(score) -> str:
-    if score is None:
-        return "<div style='text-align:center;color:#888;padding:8px;'>RM unavailable</div>"
-    if score > 1.0:
-        color, label = "#22c55e", "High"
-    elif score > -1.0:
-        color, label = "#eab308", "Mid"
+    if adapter_name is None:
+        adapter_context = model.disable_adapter()
     else:
-        color, label = "#ef4444", "Low"
-    return (
-        "<div style='text-align:center;font-family:system-ui,sans-serif;padding:8px;'>"
-        f"<div style='font-size:34px;font-weight:800;color:{color};'>{score:+.2f}</div>"
-        f"<div style='font-size:12px;color:#888;'>{label}</div></div>"
-    )
+        model.set_adapter(adapter_name)
+        adapter_context = nullcontext()
+
+    started_at = time.perf_counter()
+    with adapter_context, torch.inference_mode():
+        output = model.generate(**inputs, **generate_kwargs)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elapsed = time.perf_counter() - started_at
+
+    input_length = inputs["input_ids"].shape[1]
+    new_tokens = output[0, input_length:]
+    answer = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    if new_tokens.shape[0] >= int(max_new_tokens):
+        answer = ensure_natural_ending(answer)
+    return answer, elapsed
 
 
-def run(question: str):
-    if not question.strip():
-        return ["", "", ""] + [score_html(None)] * 3
+def run(
+    question: str,
+    mode: str,
+    temperature: float,
+    top_p: float,
+    max_new_tokens: int,
+):
+    question = question.strip()
+    if not question:
+        return "", "", "", "请输入一道面试题。"
 
-    answers, scores = {}, {}
-    order = list(STAGES)
-    for label in order:
-        spec = STAGES[label]
-        if spec["adapter"] == "not_trained":
-            answers[label] = "（RLHF/DPO 阶段尚未训练，这是下一步计划。）"
-            scores[label] = None
-            continue
-        model = tok = None
+    with _generation_lock:
         try:
-            model, tok = _load_gen(BASE_MODEL, spec["adapter"])
-            prompt = _format_prompt(question.strip())
-            enc = tok(prompt, return_tensors="pt", truncation=True, max_length=2048).to(model.device)
-            with torch.no_grad():
-                out = model.generate(**enc, pad_token_id=tok.eos_token_id, **GEN_KWARGS)
-            new_tokens = out[0][enc["input_ids"].shape[1]:]
-            answer = tok.decode(new_tokens, skip_special_tokens=True).strip()
-            if new_tokens.shape[0] >= GEN_KWARGS["max_new_tokens"]:
-                answer = ensure_natural_ending(answer)
-            answers[label] = answer
-        except Exception as e:
-            answers[label] = f"[error] {e}"
-        finally:
-            if model is not None:
-                _unload(model)
+            model, tokenizer = _load_runtime()
+        except Exception as exc:
+            message = f"模型加载失败：{type(exc).__name__}: {exc}"
+            return message, message, message, message
 
-    rm = rmtok = None
-    try:
-        rm, rmtok = _load_rm()
-        for label in order:
-            if STAGES[label]["adapter"] == "not_trained":
-                continue
-            scores[label] = _rm_score(rm, rmtok, question.strip(), answers[label])
-    except Exception:
-        for label in order:
-            scores[label] = None
-    finally:
-        if rm is not None:
-            _unload(rm)
+        answers = []
+        timings = []
+        for label, adapter_name in STAGES:
+            try:
+                answer, elapsed = _generate(
+                    model,
+                    tokenizer,
+                    question,
+                    adapter_name,
+                    mode,
+                    temperature,
+                    top_p,
+                    max_new_tokens,
+                )
+                answers.append(answer)
+                timings.append(f"{label} {elapsed:.1f}s")
+            except Exception as exc:
+                answers.append(f"生成失败：{type(exc).__name__}: {exc}")
+                timings.append(f"{label} failed")
+            finally:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-    return (
-        answers[order[0]], answers[order[1]], answers[order[2]],
-        score_html(scores[order[0]]), score_html(scores[order[1]]), score_html(scores[order[2]]),
-    )
-
-
-def _format_prompt(question: str) -> str:
-    return f"<|im_start|>user\n{question}\n<|im_end|>\n<|im_start|>assistant\n"
+    return (*answers, "完成 · " + " · ".join(timings))
 
 
 EXAMPLES = [
-    "请解释机器学习中的偏差和方差，它们分别过高时通常会出现什么现象？",
-    "请解释JVM的垃圾回收（GC）机制。什么是Minor GC、Major GC和Full GC？",
-    "有一份CSV文件包含name、age、score三列，请用Python读取它，按score降序输出前10名。要求处理文件不存在等异常。",
-    "请说一个你实际影响工作的短板，以及你在工作中采取的改进措施。",
+    ["请解释机器学习中的偏差和方差，它们分别过高时通常会出现什么现象？"],
+    ["请解释 JVM 的垃圾回收机制。什么是 Minor GC、Major GC 和 Full GC？"],
+    ["有一份 CSV 文件包含 name、age、score 三列，请用 Python 读取它，按 score 降序输出前 10 名，并处理文件不存在等异常。"],
+    ["请说一个你实际影响工作的短板，以及你在工作中采取的改进措施。"],
 ]
 
-LABELS = list(STAGES)
+CSS = """
+.model-output textarea { min-height: 360px !important; }
+.status-line { color: var(--body-text-color-subdued); }
+"""
 
-with gr.Blocks(title="面试助手微调效果 Demo — Qwen2.5-3B", theme=gr.themes.Soft()) as app:
+with gr.Blocks(
+    title="Qwen2.5-3B 面试助手",
+    theme=gr.themes.Soft(radius_size=gr.themes.sizes.radius_sm),
+    css=CSS,
+) as app:
     gr.Markdown(
-        f"""# 面试助手微调效果 Demo
-### 同一道面试题 → 基座 / SFT微调 / RLHF → reward-model 打分
+        f"""# Qwen2.5-3B 面试助手
+对比同一道题在 **Base → SFT → SFT + DPO** 三个训练阶段的回答。
 
-| | 模型 | 说明 |
-|---|---|---|
-| **{LABELS[0]}** | `{BASE_MODEL}` | 未微调的原始模型 |
-| **{LABELS[1]}** | 基座 + `{LORA_ADAPTER}` | QLoRA SFT 微调后的面试助手 |
-| **{LABELS[2]}** | — | 未训练（DPO/RLHF 是下一步） |
-
-三个回答由 reward model `{RM_MODEL}` 打分。
-> **首次运行:** 下载基座+adapter (~7GB) 并以 4bit 加载，首次生成较慢，之后很快。
-> 设备: **{_device.upper()}**"""
+`{BASE_MODEL}` · 设备：**{_device.upper()}**
+"""
     )
 
-    q = gr.Textbox(label="面试问题", placeholder="输入任意面试题…", lines=3)
+    question_input = gr.Textbox(
+        label="面试问题",
+        placeholder="输入一道面试题",
+        lines=3,
+    )
 
-    with gr.Row():
-        with gr.Column(scale=3):
-            gr.Markdown(f"### {LABELS[0]}")
-            out_a = gr.Textbox(label="Base 回答", lines=10, interactive=False)
-        with gr.Column(scale=1):
-            gr.Markdown("### RM 打分")
-            out_a_s = gr.HTML(label="Base score")
+    with gr.Accordion("生成参数", open=False):
+        mode_input = gr.Radio(
+            ["稳定对比", "自由采样"], value="稳定对比", label="生成模式"
+        )
+        with gr.Row():
+            temperature_input = gr.Slider(
+                0.1, 1.5, value=0.7, step=0.1, label="Temperature"
+            )
+            top_p_input = gr.Slider(0.1, 1.0, value=0.9, step=0.05, label="Top-p")
+            max_tokens_input = gr.Slider(
+                128, 600, value=600, step=8, label="最大新 Token"
+            )
 
-    with gr.Row():
-        with gr.Column(scale=3):
-            gr.Markdown(f"### {LABELS[1]}")
-            out_b = gr.Textbox(label="SFT 回答", lines=10, interactive=False)
-        with gr.Column(scale=1):
-            gr.Markdown("### RM 打分")
-            out_b_s = gr.HTML(label="SFT score")
+    run_button = gr.Button("运行三路对比", variant="primary")
+    status_output = gr.Markdown("就绪", elem_classes=["status-line"])
 
-    with gr.Row():
-        with gr.Column(scale=3):
-            gr.Markdown(f"### {LABELS[2]}")
-            out_c = gr.Textbox(label="RLHF 回答", lines=10, interactive=False)
-        with gr.Column(scale=1):
-            gr.Markdown("### RM 打分")
-            out_c_s = gr.HTML(label="RLHF score")
+    with gr.Row(equal_height=True):
+        base_output = gr.Textbox(
+            label="Base",
+            lines=18,
+            interactive=False,
+            elem_classes=["model-output"],
+        )
+        sft_output = gr.Textbox(
+            label="SFT",
+            lines=18,
+            interactive=False,
+            elem_classes=["model-output"],
+        )
+        dpo_output = gr.Textbox(
+            label="SFT + DPO",
+            lines=18,
+            interactive=False,
+            elem_classes=["model-output"],
+        )
 
-    btn = gr.Button("运行对比", variant="primary")
-    gr.Examples(EXAMPLES, inputs=q)
+    gr.Examples(EXAMPLES, inputs=question_input, label="示例问题")
+    gr.Markdown(
+        """### 独立测试集结果
+| 指标（64 题，贪心解码） | Base | SFT | SFT + DPO |
+|---|---:|---:|---:|
+| 回答中位字数 | 883 | 345 | 443 |
+| 自然收尾率 | 100% | 100% | 100% |
+| 强 5-gram 重复率 | 90.6% | 9.4% | 10.9% |
 
-    btn.click(run, q, [out_a, out_b, out_c, out_a_s, out_b_s, out_c_s])
-    q.submit(run, q, [out_a, out_b, out_c, out_a_s, out_b_s, out_c_s])
+完整评估结果见项目仓库 `eval/results/dpo_acceptance_v3/`。
+"""
+    )
+
+    inputs = [
+        question_input,
+        mode_input,
+        temperature_input,
+        top_p_input,
+        max_tokens_input,
+    ]
+    outputs = [base_output, sft_output, dpo_output, status_output]
+    run_button.click(run, inputs, outputs, concurrency_limit=1)
+    question_input.submit(run, inputs, outputs, concurrency_limit=1)
+
+app.queue(default_concurrency_limit=1, max_size=8)
 
 
 if __name__ == "__main__":

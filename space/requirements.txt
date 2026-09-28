@@ -1,7 +1,7 @@
-gradio>=4.44.0
-transformers>=4.41.0
+gradio==4.44.1
+transformers>=4.46.0,<6
 accelerate>=0.30.0
 bitsandbytes>=0.43.0
-peft>=0.10.0
+peft>=0.18.0,<0.19
 sentencepiece
 protobuf
