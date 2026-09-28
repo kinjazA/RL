@@ -5,6 +5,18 @@ import os
 if os.path.isdir("/data"):
     os.environ.setdefault("HF_HOME", "/data/.cache/huggingface")
 
+try:
+    import spaces
+except ImportError:
+    class _SpacesFallback:
+        @staticmethod
+        def GPU(function=None, **_kwargs):
+            if function is not None:
+                return function
+            return lambda decorated: decorated
+
+    spaces = _SpacesFallback()
+
 import gc
 import threading
 import time
@@ -140,6 +152,7 @@ def _generate(
     return answer, elapsed
 
 
+@spaces.GPU(duration=300)
 def run(
     question: str,
     mode: str,

@@ -7,8 +7,7 @@ sdk: gradio
 sdk_version: 4.44.1
 app_file: app.py
 pinned: false
-suggested_hardware: t4-small
-suggested_storage: small
+suggested_hardware: zero-a10g
 ---
 
 # Qwen2.5-3B Interview Assistant
@@ -26,14 +25,16 @@ weights. It is therefore loaded directly on the clean base model, not stacked
 on top of the SFT adapter.
 
 The app loads the 3B base model once in 4-bit and switches between the two LoRA
-adapters. Requests are serialized to keep adapter switching safe. A CUDA Space
-with at least a T4 is recommended; CPU mode is only a compatibility fallback.
+adapters. Requests are serialized to keep adapter switching safe. The generation
+entry point uses `@spaces.GPU`, so the app can run on Hugging Face ZeroGPU as
+well as a dedicated CUDA Space. CPU mode is only a compatibility fallback.
 
 ## Deploy
 
-Create a Gradio Hugging Face Space, select a T4 GPU, and place the contents of
-this directory at the root of the Space repository. Persistent storage is
-recommended so model files remain cached between restarts.
+Create a Gradio Hugging Face Space, select ZeroGPU or a dedicated T4, and place
+the contents of this directory at the root of the Space repository. Persistent
+storage is recommended for dedicated hardware so model files remain cached
+between restarts.
 
 Optional Space variables can override the defaults:
 

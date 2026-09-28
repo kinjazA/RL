@@ -256,7 +256,7 @@ python eval/audit_overlap.py
 - 前端只加载一次 4-bit 基座并切换两个 LoRA adapter；请求串行执行，避免并发切换 adapter 造成输出错位
 - 不再展示旧 OpenAssistant RM 的绝对分数；该 RM 与本项目不匹配，前端改为展示冻结 64 题的验收指标
 - 生成侧已加 natural-ending 兜底（`max_new_tokens=600` + 触顶回退到最后一个句号），保证回答不会说半句就断
-- 部署到 HF Space 需：**T4 显卡 + 持久存储**（HF 现在要求 PRO 或预付费 credits）
+- 已兼容 HF Space **ZeroGPU**（`@spaces.GPU`），也可使用 T4 + 持久存储
 - 本机无 GPU 时可用 `space/colab_demo.ipynb` 在 Colab 免费 T4 上启动同一份前端代码
 
 ---
