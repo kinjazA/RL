@@ -51,7 +51,7 @@ RL/
   space/                                      前端演示（Gradio）
     app.py                                     主界面：Base/SFT/SFT+DPO 三栏对比
     colab_demo.ipynb                           Colab 版启动（share=True 出公网链接）
-    README.md                                  HF Space 部署配置（sdk: gradio, hardware: T4）
+    README.md                                  HF Space 部署配置（Gradio + ZeroGPU/T4）
 
   generate_answers.py                         答案生成工具（DeepSeek API，断点续跑）
   convert_llamafactory.py                     CSV → alpaca JSON 转换工具
@@ -275,7 +275,7 @@ python eval/audit_overlap.py
 - [x] 修 natural ending（解码上限 + 兜底回退，见文末）
 - [x] 三路验收（Base vs SFT vs SFT+DPO，natural ending **100%**）
 - [x] 前端接入 Base / SFT / SFT+DPO 三路模型
-- [ ] 部署 Space（需付费）
+- [ ] 将 `space/` 同步到 HF Space（可用 ZeroGPU 或 T4）
 
 ---
 
@@ -375,4 +375,4 @@ llamafactory-cli train C:\Users\leeze\Documents\GitHub\RL\dpo_qwen3b.yaml
 
 - [ ] 进一步压 DPO 长度：收紧 `max_len_ratio`，或在偏好对里加长度惩罚项
 - [x] `space/app.py` 接入公开 DPO adapter，并改为单基座多 adapter 切换
-- [ ] 部署 HF Space（需付费）
+- [ ] 部署 HF Space（由 Space 所有者执行推送）
