@@ -24,15 +24,25 @@ natural ending **82.8% → 100%**，5-gram 重复率 **25.0% → 10.9%**（回�
 
 ```text
 RL/
-  data/
+  data/                                       数据（原始题库 → 训练数据）
     rlhf_interview_all_questions_merged.csv   原始题库：3230 题 × 12 列（含 150 条金标答案）
     rlhf_answers_filled.csv                   生成答案后的全量数据（3230 行，训练主数据源）
     sft_train.json                            转好的 alpaca 格式（LLaMA-Factory 直接用）
     dataset_info.json                         LLaMA-Factory 数据集注册文件
 
+  scripts/                                    管线脚本
+    generate_answers.py                       答案生成工具（DeepSeek API，断点续跑）
+    convert_llamafactory.py                   CSV → alpaca JSON 转换工具
+    setup_llamafactory.py                     LLaMA-Factory 数据接入一键脚本（SFT + DPO）
+
+  configs/                                    训练配置
+    sft_qwen3b.yaml                           QLoRA SFT 训练配置
+    dpo_qwen3b.yaml                           DPO 训练配置（从 SFT LoRA 起跑）
+
   rm/                                         偏好数据管线（RM 打分 → preference pairs）
     build_preference_data.py                  构造 chosen/rejected 对（含长度匹配，见文末）
-    artifacts/full_v1/                        805 组 pair + 质量报告 + 审计表
+    clean_candidates.py                       候选清洗
+    artifacts/full_v1/                        DPO 数据（805 组）+ 质量报告
       preference_pairs_llamafactory.json      LLaMA-Factory DPO 数据（805 组）
 
   eval/                                       独立 64 题验收
@@ -45,8 +55,9 @@ RL/
       dpo_acceptance_v2/                      修复长度偏置后 DPO
       dpo_acceptance_v3/                      最终（v2 + natural-ending 修复）
 
-  patches/
-    llamafactory-dpo-bf16-logits.patch        修 DPO OOM 的 LLaMA-Factory 补丁（**必打**，见文末）
+  verify/                                     快速风格验证
+    verify.py                                 加载 adapter 跑真题验证风格
+    infer.yaml                                推理配置（指向 HF 上的 adapter）
 
   space/                                      前端演示（Gradio）
     app.py                                     主界面：Base/SFT/SFT+DPO 三栏对比
@@ -57,14 +68,9 @@ RL/
       gen_answers.py / build_html.py           本地重新生成 / 重建页面
       deploy.py                                上传到 HF Space（sdk: static）
 
-  generate_answers.py                         答案生成工具（DeepSeek API，断点续跑）
-  convert_llamafactory.py                     CSV → alpaca JSON 转换工具
-  setup_llamafactory.py                       LLaMA-Factory 数据接入一键脚本（SFT + DPO 两个数据集）
-  sft_qwen3b.yaml                             QLoRA SFT 训练配置
-  dpo_qwen3b.yaml                             DPO 训练配置（从 SFT LoRA 起跑）
-  verify/
-    verify.py                                 加载 adapter 跑真题验证风格
-    infer.yaml                                推理配置（指向 HF 上的 adapter）
+  patches/
+    llamafactory-dpo-bf16-logits.patch        修 DPO OOM 的 LLaMA-Factory 补丁（**必打**，见文末）
+
   README.md                                   本文件
 ```
 
@@ -104,7 +110,7 @@ RL/
 金标示例（偏差-方差）：
 > 偏差表示模型的假设与真实规律之间的差距。偏差过高通常说明模型太简单，会出现欠拟合：训练集和验证集效果都比较差，而且两者差距不大。方差表示模型对训练数据波动的敏感程度。方差过高通常说明模型过度记住了训练数据，会出现过拟合：训练集效果很好，但验证集明显变差，换一批数据结果波动也比较大。本质上就是在模型复杂度和泛化能力之间做平衡。
 
-### 答案生成（`generate_answers.py`）
+### 答案生成（`scripts/generate_answers.py`）
 
 - 模型：DeepSeek `deepseek-chat`；`temperature=0.45, top_p=0.9`（保事实又不失口语）
 - 每道题把 `interview_intent` + `expected_points` 注入 prompt 当答案大纲
@@ -113,8 +119,8 @@ RL/
 
 ```bash
 export LLM_API_KEY=<DeepSeek key>
-python generate_answers.py --provider deepseek --limit 5    # 先试 5 条
-python generate_answers.py --provider deepseek              # 全量
+python scripts/generate_answers.py --provider deepseek --limit 5    # 先试 5 条
+python scripts/generate_answers.py --provider deepseek              # 全量
 # 其他模型: --provider qwen | moonshot | ollama(本地)
 ```
 
@@ -143,15 +149,15 @@ pip install "transformers>=4.55,<=5.8.0" "datasets<=4.0.0" "accelerate<=1.11.0" 
   "gradio-client==1.14.0"
 ```
 
-### 1. 数据接入（`setup_llamafactory.py` 一键完成）
+### 1. 数据接入（`scripts/setup_llamafactory.py` 一键完成）
 
 把 `data/sft_train.json` 拷进 LLaMA-Factory，并把 `sft_train` 注册进它的 `dataset_info.json`：
 
 ```bash
-python setup_llamafactory.py    # 幂等，可重复跑
+python scripts/setup_llamafactory.py    # 幂等，可重复跑
 ```
 
-### 2. 训练配置（`sft_qwen3b.yaml`）
+### 2. 训练配置（`configs/sft_qwen3b.yaml`）
 
 | 参数 | 值 | 说明 |
 |---|---|---|
@@ -177,7 +183,7 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
 $env:PATH = "C:\Users\leeze\anaconda3\envs\llama\Scripts;C:\Users\leeze\anaconda3\envs\llama;$env:PATH"
 
 cd C:\Users\leeze\Documents\GitHub\LLaMA-Factory
-llamafactory-cli train sft_qwen3b.yaml
+llamafactory-cli train C:\Users\leeze\Documents\GitHub\RL\configs\sft_qwen3b.yaml
 ```
 
 **训练完产物**：`saves/Qwen2.5-3B-Instruct/lora/sft-cli/` 下的 checkpoint，含 `adapter_model.safetensors`（LoRA 增量权重）+ `training_loss.png`。
@@ -331,10 +337,10 @@ git apply ../RL/patches/llamafactory-dpo-bf16-logits.patch
 
 ```bash
 cd C:\Users\leeze\Documents\GitHub\LLaMA-Factory
-llamafactory-cli train C:\Users\leeze\Documents\GitHub\RL\dpo_qwen3b.yaml
+llamafactory-cli train C:\Users\leeze\Documents\GitHub\RL\configs\dpo_qwen3b.yaml
 ```
 
-`dpo_qwen3b.yaml` 关键配置：
+`configs/dpo_qwen3b.yaml` 关键配置：
 
 | 参数 | 值 | 说明 |
 |---|---|---|
