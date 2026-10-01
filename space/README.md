@@ -48,3 +48,15 @@ The public demo intentionally does not display a reward-model score. The old
 prototype used an unrelated OpenAssistant reward model, whose absolute scores
 were not valid evidence for this project's interview-answer quality. Frozen
 64-question acceptance metrics are shown instead.
+
+## Static showcase
+
+The live Gradio app above cannot run on the free ZeroGPU tier: cold-starting the
+6GB base model in 4-bit plus three-way generation exceeds the ~120s per-call
+limit. [`static/`](static/) holds the deployed workaround — a free static Space
+with pre-generated three-stage answers for five representative questions:
+
+- `gen_answers.py` — regenerate `answers.json` locally (needs the base model +
+  both adapters, reuses `app._load_runtime` / `app._generate`)
+- `build_html.py` — build the self-contained `index.html` from `answers.json`
+- `deploy.py` — upload `index.html` + `README.md` to the Space as `sdk: static`

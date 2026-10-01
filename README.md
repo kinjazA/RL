@@ -52,6 +52,10 @@ RL/
     app.py                                     主界面：Base/SFT/SFT+DPO 三栏对比
     colab_demo.ipynb                           Colab 版启动（share=True 出公网链接）
     README.md                                  HF Space 部署配置（Gradio + ZeroGPU/T4）
+    static/                                    已部署的免费静态展示（预生成三阶段回答）
+      index.html                               自包含页面（内嵌答案 + 指标）
+      gen_answers.py / build_html.py           本地重新生成 / 重建页面
+      deploy.py                                上传到 HF Space（sdk: static）
 
   generate_answers.py                         答案生成工具（DeepSeek API，断点续跑）
   convert_llamafactory.py                     CSV → alpaca JSON 转换工具
