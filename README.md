@@ -6,10 +6,11 @@
 
 ## 在线 Demo
 
-**https://huggingface.co/spaces/Shawnno/Interview_Assistant**
+**静态版**：**https://huggingface.co/spaces/Shawnno/Interview_Assistant**
+5 道代表性面试题的 Base / SFT / SFT+DPO 三栏回答对比。
 
-5 道代表性面试题的 Base / SFT / SFT+DPO 三栏回答对比（免费静态展示，秒开）。
-想现场输入任意题，用 `space/colab_demo.ipynb` 在 Colab 免费 T4 上跑 live 版。
+**live 版（现场输入任意题）**：`space/app.py`（Gradio 界面）+ `space/colab_demo.ipynb`（Colab 免费 T4 一键启动，`share=True` 出公网链接）。
+
 
 ## 成果
 
