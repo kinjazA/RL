@@ -251,13 +251,18 @@ python eval/audit_overlap.py
 
 ## 前端展示（`space/`）
 
-- 同一道题 → Base / SFT / SFT+DPO 三栏回答，展示“微调 → 对齐”带来的变化
-- `app.py` 已接入公开 SFT adapter（`Shawnno/qwen2.5-3b-interview-sft-lora`）和 DPO adapter（`Shawnno/qwen2.5-3b-interview-dpo-lora`）
-- 前端只加载一次 4-bit 基座并切换两个 LoRA adapter；请求串行执行，避免并发切换 adapter 造成输出错位
-- 不再展示旧 OpenAssistant RM 的绝对分数；该 RM 与本项目不匹配，前端改为展示冻结 64 题的验收指标
-- 生成侧已加 natural-ending 兜底（`max_new_tokens=600` + 触顶回退到最后一个句号），保证回答不会说半句就断
-- 已兼容 HF Space **ZeroGPU**（`@spaces.GPU`），也可使用 T4 + 持久存储
-- 本机无 GPU 时可用 `space/colab_demo.ipynb` 在 Colab 免费 T4 上启动同一份前端代码
+**公开 Demo（静态，免费）**：**[huggingface.co/spaces/Shawnno/Interview_Assistant](https://huggingface.co/spaces/Shawnno/Interview_Assistant)**
+
+- 5 道代表性面试题的 Base / SFT / SFT+DPO 三栏回答已预生成，附 64 题验收指标，免费、秒开、不排队
+- 选静态而非 live 的原因：免费 ZeroGPU 单次 GPU 上限约 120s，放不下「下 6GB 模型 + 4bit 加载 + 三路生成」的冷启动；要 live 需付费 GPU Space
+
+**现场输入任意题的 live 版（代码在 `space/`）**：
+
+- `app.py`：加载一次 4-bit 基座、切换两个 LoRA adapter，三栏对比；请求串行执行
+- 已接入公开 SFT adapter（`Shawnno/qwen2.5-3b-interview-sft-lora`）和 DPO adapter（`Shawnno/qwen2.5-3b-interview-dpo-lora`）
+- 不再展示旧 OpenAssistant RM 的绝对分数（与本项目不匹配），改展示冻结 64 题指标
+- 生成侧已加 natural-ending 兜底（`max_new_tokens=600` + 触顶回退到最后一个句号）
+- 本机无 GPU 时用 `space/colab_demo.ipynb` 在 Colab 免费 T4 上启动（share=True 出公网链接）
 
 ---
 
@@ -275,7 +280,7 @@ python eval/audit_overlap.py
 - [x] 修 natural ending（解码上限 + 兜底回退，见文末）
 - [x] 三路验收（Base vs SFT vs SFT+DPO，natural ending **100%**）
 - [x] 前端接入 Base / SFT / SFT+DPO 三路模型
-- [ ] 将 `space/` 同步到 HF Space（可用 ZeroGPU 或 T4）
+- [x] 部署公开 HF Space（静态展示，免费；live 版需付费 GPU）
 
 ---
 
@@ -375,4 +380,4 @@ llamafactory-cli train C:\Users\leeze\Documents\GitHub\RL\dpo_qwen3b.yaml
 
 - [ ] 进一步压 DPO 长度：收紧 `max_len_ratio`，或在偏好对里加长度惩罚项
 - [x] `space/app.py` 接入公开 DPO adapter，并改为单基座多 adapter 切换
-- [ ] 部署 HF Space（由 Space 所有者执行推送）
+- [x] 部署公开 HF Space（静态展示，免费）
